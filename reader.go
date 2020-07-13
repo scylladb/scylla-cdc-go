@@ -46,6 +46,12 @@ type ReaderConfig struct {
 	ChangeConsumer ChangeConsumer
 }
 
+func (rc *ReaderConfig) Copy() *ReaderConfig {
+	newRC := &ReaderConfig{}
+	*newRC = *rc
+	return newRC
+}
+
 var (
 	ErrNotALogTable = errors.New("the table is not a CDC log table")
 )
@@ -69,7 +75,7 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 	}
 
 	reader := &Reader{
-		config:  &*config, // make a copy
+		config:  config.Copy(),
 		stopped: 0,
 	}
 	return reader, nil
