@@ -13,7 +13,8 @@ var (
 	// The table that keeps names of the generations changed names.
 	// This is a list of known supported names, starting from the newest one.
 	generationsTableNames []string = []string{
-		"system_distributed.cdc_streams", // Introduced in Scylla 4.1
+		"system_distributed.cdc_streams_descriptions", // Introduced in Scylla 4.3
+		"system_distributed.cdc_streams",              // Introduced in Scylla 4.1
 		"system_distributed.cdc_description",
 	}
 )
