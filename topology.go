@@ -3,6 +3,7 @@ package scylla_cdc
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,12 +25,159 @@ var (
 	ErrNoGenerationsPresent = errors.New("there are no generations present")
 )
 
+const (
+	generationFetchPeriod time.Duration = 15 * time.Second
+)
+
 type generation struct {
 	startTime time.Time
 	streams   []stream
 }
 
 type stream []byte
+
+type generationList []generation
+
+func (gl generationList) Len() int {
+	return len(gl)
+}
+
+func (gl generationList) Less(i, j int) bool {
+	return gl[i].startTime.Before(gl[j].startTime)
+}
+
+func (gl generationList) Swap(i, j int) {
+	gl[i], gl[j] = gl[j], gl[i]
+}
+
+type generationFetcher struct {
+	session        *gocql.Session
+	clusterTracker *ClusterStateTracker
+	genTableName   string
+	lastTime       time.Time
+
+	generationCh chan *generation
+	refreshCh    chan struct{}
+	stopCh       chan struct{}
+}
+
+func newGenerationFetcher(session *gocql.Session, clusterTracker *ClusterStateTracker, startFrom time.Time) (*generationFetcher, error) {
+	tableName, err := getGenerationsTableName(session)
+	if err != nil {
+		return nil, err
+	}
+
+	gf := &generationFetcher{
+		session:        session,
+		clusterTracker: clusterTracker,
+		genTableName:   tableName,
+		lastTime:       startFrom,
+
+		generationCh: make(chan *generation),
+		stopCh:       make(chan struct{}),
+		refreshCh:    make(chan struct{}, 1),
+	}
+	return gf, nil
+}
+
+func (gf *generationFetcher) run() error {
+	// Detect consistency, based on the cluster size
+	clusterSize := 1
+	if gf.clusterTracker != nil {
+		clusterSize = gf.clusterTracker.GetClusterSize()
+	}
+
+	consistency := gocql.One
+	if clusterSize == 2 {
+		consistency = gocql.Quorum
+	} else if clusterSize > 2 {
+		consistency = gocql.All
+	}
+
+	// Prepare the query
+	queryString := fmt.Sprintf("SELECT time, streams FROM %s WHERE time > ?", gf.genTableName)
+	q := gf.session.Query(queryString).Consistency(consistency)
+
+	ticker := time.NewTicker(generationFetchPeriod)
+
+	// We want to be able to reset the ticker by re-creating it
+	// Therefore we can't write `defer ticker.Stop()` because it will bind
+	// the deferred invocation to the current `ticker, not the one that is
+	// assigned to the `ticker` variable
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+
+outer:
+	for {
+		var (
+			gl  generationList
+			gen generation
+		)
+
+		// See if there are any new generations
+		iter := q.Bind(gf.lastTime).Iter()
+		for iter.Scan(&gen.startTime, &gen.streams) {
+			gl = append(gl, gen)
+		}
+
+		if err := iter.Close(); err != nil {
+			return err
+		}
+
+		sort.Sort(gl)
+
+		if len(gl) > 0 {
+			// Save the timestamp of the oldest generation
+			gf.lastTime = gl[len(gl)-1].startTime
+		}
+
+		// Push generations that we fetched to generationCh
+		for _, g := range gl {
+			select {
+			case <-gf.stopCh:
+				break outer
+			case gf.generationCh <- &g:
+			}
+		}
+
+		select {
+		// Give priority to the stop channel
+		case <-gf.stopCh:
+			break outer
+		default:
+			select {
+			case <-gf.stopCh:
+				break outer
+			case <-ticker.C:
+			case <-gf.refreshCh:
+				// TODO: In Go 1.15, we can change it to ticker.Reset()
+				// This will also let us get rid of the trick in defer
+				ticker.Stop()
+				ticker = time.NewTicker(generationFetchPeriod)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (gf *generationFetcher) get() *generation {
+	return <-gf.generationCh
+}
+
+func (gf *generationFetcher) stop() {
+	close(gf.stopCh)
+}
+
+func (gf *generationFetcher) triggerRefresh() {
+	select {
+	case gf.refreshCh <- struct{}{}:
+	default:
+	}
+}
 
 // Finds the most recent generation
 func (r *Reader) findLatestGeneration() (*generation, error) {
