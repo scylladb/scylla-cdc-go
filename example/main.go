@@ -19,7 +19,7 @@ func main() {
 	tracker := scylla_cdc.NewClusterStateTracker(gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy()))
 
 	// Configure a session first
-	cluster := gocql.NewCluster("127.0.0.1")
+	cluster := gocql.NewCluster("172.17.0.2")
 	cluster.PoolConfig.HostSelectionPolicy = tracker
 	session, err := cluster.CreateSession()
 	if err != nil {
@@ -31,7 +31,6 @@ func main() {
 	cfg := &scylla_cdc.ReaderConfig{
 		Session:             session,
 		Consistency:         gocql.One,
-		Context:             context.Background(),
 		LogTableName:        "ks.tbl_scylla_cdc_log",
 		ChangeConsumer:      scylla_cdc.ChangeConsumerFunc(simpleConsumer),
 		ClusterStateTracker: tracker,
@@ -61,7 +60,7 @@ func main() {
 	}()
 	signal.Notify(signalC, os.Interrupt)
 
-	if err := reader.Run(); err != nil {
+	if err := reader.Run(context.Background()); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -72,8 +71,8 @@ func simpleConsumer(change scylla_cdc.Change) {
 	fmt.Printf("Time is %v\n", change.GetTime().Time())
 	fmt.Printf("TTL is %d\n", change.GetTTL())
 	fmt.Printf("Value of column \"pk\" is %v\n", change.GetValue("pk"))
-	fmt.Printf("Value of column \"c\" is %v\n", change.GetValue("c"))
-	fmt.Printf("Was \"c\" column deleted? %t\n", change.IsDeleted("c"))
-	fmt.Printf("Deleted elements of column \"c\": %v\n", change.GetDeletedElements("c"))
+	fmt.Printf("Value of column \"v1\" is %v\n", change.GetValue("v1"))
+	fmt.Printf("Was \"v1\" column deleted? %t\n", change.IsDeleted("v1"))
+	// fmt.Printf("Deleted elements of column \"c\": %v\n", change.GetDeletedElements("c"))
 	fmt.Println("")
 }

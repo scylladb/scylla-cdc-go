@@ -1,6 +1,7 @@
 package scylla_cdc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -36,7 +37,7 @@ type generation struct {
 
 type stream []byte
 
-type generationList []generation
+type generationList []*generation
 
 func (gl generationList) Len() int {
 	return len(gl)
@@ -61,7 +62,11 @@ type generationFetcher struct {
 	stopCh       chan struct{}
 }
 
-func newGenerationFetcher(session *gocql.Session, clusterTracker *ClusterStateTracker, startFrom time.Time) (*generationFetcher, error) {
+func newGenerationFetcher(
+	session *gocql.Session,
+	clusterTracker *ClusterStateTracker,
+	startFrom time.Time,
+) (*generationFetcher, error) {
 	tableName, err := getGenerationsTableName(session)
 	if err != nil {
 		return nil, err
@@ -80,7 +85,7 @@ func newGenerationFetcher(session *gocql.Session, clusterTracker *ClusterStateTr
 	return gf, nil
 }
 
-func (gf *generationFetcher) run() error {
+func (gf *generationFetcher) run(ctx context.Context) error {
 	// Detect consistency, based on the cluster size
 	clusterSize := 1
 	if gf.clusterTracker != nil {
@@ -95,7 +100,7 @@ func (gf *generationFetcher) run() error {
 	}
 
 	// Prepare the query
-	queryString := fmt.Sprintf("SELECT time, streams FROM %s WHERE time > ?", gf.genTableName)
+	queryString := fmt.Sprintf("SELECT time, streams FROM %s WHERE time > ? ALLOW FILTERING", gf.genTableName)
 	q := gf.session.Query(queryString).Consistency(consistency)
 
 	ticker := time.NewTicker(generationFetchPeriod)
@@ -105,21 +110,20 @@ func (gf *generationFetcher) run() error {
 	// the deferred invocation to the current `ticker, not the one that is
 	// assigned to the `ticker` variable
 	defer func() {
-		if ticker != nil {
-			ticker.Stop()
-		}
+		ticker.Stop()
 	}()
 
 outer:
 	for {
-		var (
-			gl  generationList
-			gen generation
-		)
+		var gl generationList
 
 		// See if there are any new generations
 		iter := q.Bind(gf.lastTime).Iter()
-		for iter.Scan(&gen.startTime, &gen.streams) {
+		for {
+			gen := &generation{}
+			if !iter.Scan(&gen.startTime, &gen.streams) {
+				break
+			}
 			gl = append(gl, gen)
 		}
 
@@ -139,18 +143,23 @@ outer:
 			select {
 			case <-gf.stopCh:
 				break outer
-			case gf.generationCh <- &g:
+			case gf.generationCh <- g:
+				fmt.Printf("Pushed generation %s\n", g.startTime)
 			}
 		}
 
 		select {
-		// Give priority to the stop channel
+		// Give priority to the stop channel and the context
 		case <-gf.stopCh:
 			break outer
+		case <-ctx.Done():
+			return ctx.Err()
 		default:
 			select {
 			case <-gf.stopCh:
 				break outer
+			case <-ctx.Done():
+				return ctx.Err()
 			case <-ticker.C:
 			case <-gf.refreshCh:
 				// TODO: In Go 1.15, we can change it to ticker.Reset()
@@ -164,8 +173,15 @@ outer:
 	return nil
 }
 
-func (gf *generationFetcher) get() *generation {
-	return <-gf.generationCh
+func (gf *generationFetcher) get(ctx context.Context) (*generation, error) {
+	select {
+	case <-gf.stopCh:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case gen := <-gf.generationCh:
+		return gen, nil
+	}
 }
 
 func (gf *generationFetcher) stop() {
