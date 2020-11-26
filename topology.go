@@ -144,7 +144,6 @@ outer:
 			case <-gf.stopCh:
 				break outer
 			case gf.generationCh <- g:
-				fmt.Printf("Pushed generation %s\n", g.startTime)
 			}
 		}
 
@@ -193,57 +192,6 @@ func (gf *generationFetcher) triggerRefresh() {
 	case gf.refreshCh <- struct{}{}:
 	default:
 	}
-}
-
-// Finds the most recent generation
-func (r *Reader) findLatestGeneration() (*generation, error) {
-	tableName, err := getGenerationsTableName(r.config.Session)
-	if err != nil {
-		return nil, err
-	}
-
-	// Choose the most recent generation
-	queryString := fmt.Sprintf("SELECT time, expired, streams FROM %s BYPASS CACHE", tableName)
-
-	// Detect consistency, based on the cluster size
-	clusterSize := 1
-	if r.config.ClusterStateTracker != nil {
-		clusterSize = r.config.ClusterStateTracker.GetClusterSize()
-	}
-
-	consistency := gocql.One
-	if clusterSize == 2 {
-		consistency = gocql.Quorum
-	} else if clusterSize > 2 {
-		consistency = gocql.All
-	}
-
-	iter := r.config.Session.Query(queryString).Consistency(consistency).Iter()
-
-	var timestamp, bestTimestamp, expired time.Time
-	var streams, bestStreams []stream
-
-	for iter.Scan(&timestamp, &expired, &streams) {
-		if bestTimestamp.Before(timestamp) {
-			bestTimestamp = timestamp
-			bestStreams = streams
-		}
-	}
-
-	if err = iter.Close(); err != nil {
-		return nil, err
-	}
-
-	if len(bestStreams) == 0 {
-		return nil, ErrNoGenerationsPresent
-	}
-
-	gen := &generation{
-		startTime: bestTimestamp,
-		streams:   bestStreams,
-	}
-
-	return gen, nil
 }
 
 // Finds a name of a supported table for fetching cdc streams

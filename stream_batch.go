@@ -105,7 +105,6 @@ outer:
 		}
 
 		if sbr.reachedEndOfTheGeneration(confidenceWindowEnd) {
-			// fmt.Printf("Breaking free, %t\n")
 			break outer
 		}
 

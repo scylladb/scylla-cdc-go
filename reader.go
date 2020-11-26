@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +39,9 @@ type ReaderConfig struct {
 
 	// A callback which processes information fetched from the CDC log.
 	ChangeConsumer ChangeConsumer
+
+	// A logger. If set, it will receive log messages useful for debugging of the library.
+	Logger Logger
 }
 
 func (rc *ReaderConfig) Copy() *ReaderConfig {
@@ -99,11 +101,9 @@ func (r *Reader) Run(ctx context.Context) error {
 		case <-r.stoppedCh:
 		}
 		r.genFetcher.stop()
-		fmt.Println("Shutdown triggered")
 		return nil
 	})
 	runErrG.Go(func() error {
-		defer fmt.Println("Fetcher stopped")
 		return r.genFetcher.run(runCtx)
 	})
 	runErrG.Go(func() error {
@@ -120,8 +120,6 @@ func (r *Reader) Run(ctx context.Context) error {
 			}
 
 			genErrG, genCtx := errgroup.WithContext(runCtx)
-
-			fmt.Printf("Opening generation %s\n", gen.startTime)
 
 			readers := make([]*streamBatchReader, 0, len(split))
 			for _, group := range split {
@@ -141,16 +139,12 @@ func (r *Reader) Run(ctx context.Context) error {
 				genErrG.Go(func() error {
 					// TODO: Do something sensible with returned timeuuid
 					_, err := reader.run(genCtx)
-					// fmt.Println("Reader stopped")
 					return err
 				})
 			}
 
-			fmt.Println("Running all readers complete")
-
 			var nextGen *generation
 			genErrG.Go(func() error {
-				defer fmt.Println("Stopping generation waiter")
 				var err error
 				nextGen, err = r.genFetcher.get(genCtx)
 				if err != nil {
@@ -220,63 +214,3 @@ func (r *Reader) splitStreams(streams []stream) (split [][]stream, err error) {
 	}
 	return groups, nil
 }
-
-// func (r *Reader) processStreamGroup(ctx context.Context, streams []stream) error {
-// 	if len(streams) == 0 {
-// 		return nil
-// 	}
-
-// 	lastTimestamp := gocql.MinTimeUUID(time.Now())
-
-// 	streamsWildcards := "?" + strings.Repeat(", ?", len(streams)-1)
-// 	queryString := fmt.Sprintf(
-// 		"SELECT * FROM %s WHERE \"cdc$stream_id\" IN (%s) AND \"cdc$time\" > ? AND \"cdc$time\" < ?",
-// 		r.config.LogTableName,
-// 		streamsWildcards,
-// 	)
-// 	query := r.config.Session.Query(queryString).Consistency(r.config.Consistency)
-
-// 	for {
-// 		if atomic.LoadInt32(&r.stopped) != 0 {
-// 			return nil
-// 		}
-// 		if err := ctx.Err(); err != nil {
-// 			return err
-// 		}
-
-// 		readRangeStartTimestamp := lastTimestamp
-// 		if r.config.LowerBoundReadOffset != 0 {
-// 			readRangeStartTimestamp = gocql.MinTimeUUID(lastTimestamp.Time().Add(-r.config.LowerBoundReadOffset))
-// 		}
-
-// 		readRangeEndTimestamp := gocql.MaxTimeUUID(time.Now().Add(-r.config.UpperBoundReadOffset))
-
-// 		bindArgs := make([]interface{}, 0, len(streams)+2)
-// 		for _, stream := range streams {
-// 			bindArgs = append(bindArgs, stream)
-// 		}
-// 		bindArgs = append(bindArgs, readRangeStartTimestamp, readRangeEndTimestamp)
-
-// 		iter := query.Bind(bindArgs...).Iter()
-
-// 		for {
-// 			timestamp := &gocql.UUID{}
-// 			data := map[string]interface{}{
-// 				"cdc$time": timestamp,
-// 			}
-// 			if !iter.MapScan(data) {
-// 				break
-// 			}
-
-// 			r.config.ChangeConsumer.Consume(Change{data: data})
-
-// 			if bytes.Compare(lastTimestamp[:], timestamp[:]) < 0 {
-// 				lastTimestamp = *timestamp
-// 			}
-// 		}
-
-// 		if err := iter.Close(); err != nil {
-// 			return err
-// 		}
-// 	}
-// }
