@@ -1,6 +1,7 @@
 package scylla_cdc
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -11,9 +12,9 @@ import (
 
 const (
 	// TODO: Change into parametrs
-	confidenceWindow       = 30 * time.Second
-	postNonEmptyQueryDelay = 10 * time.Second
-	postEmptyQueryDelay    = 30 * time.Second
+	confidenceWindow       = 3 * time.Second
+	postNonEmptyQueryDelay = 1 * time.Second
+	postEmptyQueryDelay    = 3 * time.Second
 )
 
 type streamBatchReader struct {
@@ -47,7 +48,7 @@ func newStreamBatchReader(
 	}
 }
 
-func (sbr *streamBatchReader) run() (gocql.UUID, error) {
+func (sbr *streamBatchReader) run(ctx context.Context) (gocql.UUID, error) {
 	// Prepare the primary key condition
 	var pkCondition string
 	if len(sbr.streams) == 1 {
@@ -103,7 +104,8 @@ outer:
 			}
 		}
 
-		if sbr.reachedEndOfTheGeneration() {
+		if sbr.reachedEndOfTheGeneration(confidenceWindowEnd) {
+			// fmt.Printf("Breaking free, %t\n")
 			break outer
 		}
 
@@ -117,11 +119,14 @@ outer:
 	delay:
 		for {
 			select {
+			case <-ctx.Done():
+				return sbr.lastTimestamp, ctx.Err()
 			case <-time.After(delayUntil.Sub(time.Now())):
 				break delay
 			case <-sbr.interruptCh:
-				if sbr.reachedEndOfTheGeneration() {
-					break outer
+				if sbr.reachedEndOfTheGeneration(confidenceWindowEnd) {
+					// We need to poll at least once more
+					break delay
 				}
 			}
 		}
@@ -130,9 +135,9 @@ outer:
 	return sbr.lastTimestamp, nil
 }
 
-func (sbr *streamBatchReader) reachedEndOfTheGeneration() bool {
+func (sbr *streamBatchReader) reachedEndOfTheGeneration(windowEnd gocql.UUID) bool {
 	end, isClosed := sbr.endTimestamp.Load().(gocql.UUID)
-	return isClosed && compareTimeuuid(end, sbr.lastTimestamp) < 0
+	return isClosed && (end == gocql.UUID{} || compareTimeuuid(end, windowEnd) <= 0)
 }
 
 // Only one of `close`, `stopNow` methods should be called, only once
@@ -143,5 +148,5 @@ func (sbr *streamBatchReader) close(processUntil gocql.UUID) {
 }
 
 func (sbr *streamBatchReader) stopNow() {
-	sbr.close(gocql.MinTimeUUID(time.Now().Add(confidenceWindow)))
+	sbr.close(gocql.UUID{})
 }
