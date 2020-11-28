@@ -74,38 +74,56 @@ func (sbr *streamBatchReader) run(ctx context.Context) (gocql.UUID, error) {
 outer:
 	for {
 		confidenceWindowEnd := gocql.UUIDFromTime(time.Now().Add(-confidenceWindow))
-		hadRows := false
+		if sbr.reachedEndOfTheGeneration(confidenceWindowEnd) {
+			break outer
+		}
 
+		hadRows := false
 		if compareTimeuuid(sbr.lastTimestamp, confidenceWindowEnd) < 0 {
 			// Set the time interval from which we need to return data
 			bindArgs[len(bindArgs)-2] = sbr.lastTimestamp
 			bindArgs[len(bindArgs)-1] = confidenceWindowEnd
-			iter := q.Bind(bindArgs...).Iter()
+			iter, err := newChangeRowIterator(q.Bind(bindArgs...).Iter())
+			if err != nil {
+				return sbr.lastTimestamp, err
+			}
 
+			var change Change
 			for {
-				timestamp := gocql.UUID{}
-				data := map[string]interface{}{
-					"cdc$time": &timestamp,
-				}
-				if !iter.MapScan(data) {
+				streamCols, c := iter.Next()
+				if c == nil {
 					break
 				}
-				hadRows = true
 
-				sbr.consumer.Consume(Change{data: data})
-
-				if compareTimeuuid(sbr.lastTimestamp, timestamp) < 0 {
-					sbr.lastTimestamp = timestamp
+				if c.GetOperation() == PreImage {
+					change.Preimage = append(change.Preimage, c)
+				} else if c.GetOperation() == PostImage {
+					change.Postimage = append(change.Postimage, c)
+				} else {
+					change.Delta = append(change.Delta, c)
 				}
+
+				if c.cdcCols.endOfBatch {
+					change.StreamID = streamCols.streamID
+					change.Time = streamCols.time
+					sbr.consumer.Consume(change)
+
+					change.Preimage = nil
+					change.Delta = nil
+					change.Postimage = nil
+
+					// Update the last timestamp only after we processed whole batch
+					if compareTimeuuid(sbr.lastTimestamp, streamCols.time) < 0 {
+						sbr.lastTimestamp = streamCols.time
+					}
+				}
+
+				hadRows = true
 			}
 
 			if err := iter.Close(); err != nil {
-				return sbr.lastTimestamp, nil
+				return sbr.lastTimestamp, err
 			}
-		}
-
-		if sbr.reachedEndOfTheGeneration(confidenceWindowEnd) {
-			break outer
 		}
 
 		delay := postNonEmptyQueryDelay
@@ -124,7 +142,6 @@ outer:
 				break delay
 			case <-sbr.interruptCh:
 				if sbr.reachedEndOfTheGeneration(confidenceWindowEnd) {
-					// We need to poll at least once more
 					break delay
 				}
 			}

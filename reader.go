@@ -66,6 +66,10 @@ type Reader struct {
 
 // Creates a new CDC reader.
 func NewReader(config *ReaderConfig) (*Reader, error) {
+	if config.Logger == nil {
+		config.Logger = &noLogger{}
+	}
+
 	if !strings.HasSuffix(config.LogTableName, cdcTableSuffix) {
 		return nil, ErrNotALogTable
 	}
@@ -73,7 +77,8 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 	genFetcher, err := newGenerationFetcher(
 		config.Session,
 		config.ClusterStateTracker,
-		time.Now().Add(-24*time.Hour), // TODO: We should start from a provided timestamp
+		time.Now().Add(-10000*time.Hour), // TODO: We should start from a provided timestamp
+		config.Logger,
 	)
 	if err != nil {
 		return nil, err
@@ -91,6 +96,8 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 // is stopped gracefully.
 func (r *Reader) Run(ctx context.Context) error {
 	// TODO: Return a "snapshot" or something
+
+	l := r.config.Logger
 
 	runErrG, runCtx := errgroup.WithContext(ctx)
 
@@ -113,11 +120,15 @@ func (r *Reader) Run(ctx context.Context) error {
 		}
 
 		for {
+			l.Printf("starting reading from generation %v", gen.startTime)
+
 			// Start batch readers for this generation
 			split, err := r.splitStreams(gen.streams)
 			if err != nil {
 				return err
 			}
+
+			l.Printf("grouped %d streams into %d batches", len(gen.streams), len(split))
 
 			genErrG, genCtx := errgroup.WithContext(runCtx)
 
@@ -163,6 +174,7 @@ func (r *Reader) Run(ctx context.Context) error {
 			if err := genErrG.Wait(); err != nil {
 				return err
 			}
+			l.Printf("stopped reading from generation %v", gen.startTime)
 			if nextGen == nil {
 				break
 			}

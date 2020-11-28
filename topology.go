@@ -56,6 +56,7 @@ type generationFetcher struct {
 	clusterTracker *ClusterStateTracker
 	genTableName   string
 	lastTime       time.Time
+	logger         Logger
 
 	generationCh chan *generation
 	refreshCh    chan struct{}
@@ -66,6 +67,7 @@ func newGenerationFetcher(
 	session *gocql.Session,
 	clusterTracker *ClusterStateTracker,
 	startFrom time.Time,
+	logger Logger,
 ) (*generationFetcher, error) {
 	tableName, err := getGenerationsTableName(session)
 	if err != nil {
@@ -77,6 +79,7 @@ func newGenerationFetcher(
 		clusterTracker: clusterTracker,
 		genTableName:   tableName,
 		lastTime:       startFrom,
+		logger:         logger,
 
 		generationCh: make(chan *generation),
 		stopCh:       make(chan struct{}),
@@ -113,6 +116,9 @@ func (gf *generationFetcher) run(ctx context.Context) error {
 		ticker.Stop()
 	}()
 
+	l := gf.logger
+	l.Printf("starting generation fetcher loop")
+
 outer:
 	for {
 		var gl generationList
@@ -134,12 +140,15 @@ outer:
 		sort.Sort(gl)
 
 		if len(gl) > 0 {
+			l.Printf("poll returned %d new generations", len(gl))
+
 			// Save the timestamp of the oldest generation
 			gf.lastTime = gl[len(gl)-1].startTime
 		}
 
 		// Push generations that we fetched to generationCh
 		for _, g := range gl {
+			l.Printf("pushing generation %v", g.startTime)
 			select {
 			case <-gf.stopCh:
 				break outer
@@ -169,6 +178,7 @@ outer:
 		}
 	}
 
+	l.Printf("stopped generation fetcher")
 	return nil
 }
 

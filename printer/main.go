@@ -2,24 +2,35 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"time"
 
 	"github.com/gocql/gocql"
 	scylla_cdc "github.com/piodul/scylla-cdc-go"
 )
 
+// TODO: Fix printing
+
 func main() {
-	// This wrapper around HostSelectionPolicy is used in order to forward information about the cluster topology
-	// to the Reader. This is a limitation of gocql library and the need for it will be removed if the needed
-	// functionality is implemented in gocql.
+	var (
+		keyspace string
+		table    string
+		source   string
+	)
+
+	flag.StringVar(&keyspace, "keyspace", "", "keyspace name")
+	flag.StringVar(&table, "table", "", "table name")
+	flag.StringVar(&source, "source", "127.0.0.1", "address of a node in the cluster")
+	flag.Parse()
+
 	tracker := scylla_cdc.NewClusterStateTracker(gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy()))
 
 	// Configure a session first
-	cluster := gocql.NewCluster("127.0.0.1")
+	cluster := gocql.NewCluster(source)
 	cluster.PoolConfig.HostSelectionPolicy = tracker
 	session, err := cluster.CreateSession()
 	if err != nil {
@@ -30,17 +41,10 @@ func main() {
 	// Configuration for the CDC reader
 	cfg := &scylla_cdc.ReaderConfig{
 		Session:             session,
-		Consistency:         gocql.One,
-		LogTableName:        "ks.tbl_scylla_cdc_log",
-		ChangeConsumer:      scylla_cdc.ChangeConsumerFunc(simpleConsumer),
+		Consistency:         gocql.Quorum,
+		LogTableName:        keyspace + "." + table,
+		ChangeConsumer:      scylla_cdc.ChangeConsumerFunc(printerConsumer),
 		ClusterStateTracker: tracker,
-
-		// Those two are the main knobs that control library's polling strategy.
-		// Refer to the README for information on how to configure them.
-		//
-		// This configuration represents the first strategy (quick processing, with duplicates).
-		LowerBoundReadOffset: 3 * time.Second,
-		UpperBoundReadOffset: 0,
 
 		Logger: log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
 	}
@@ -67,6 +71,25 @@ func main() {
 	}
 }
 
-func simpleConsumer(change scylla_cdc.Change) {
-	fmt.Println(change)
+func printerConsumer(c scylla_cdc.Change) {
+	fmt.Printf("[%s %s]:\n", hex.EncodeToString(c.StreamID), c.Time.String())
+	if len(c.Preimage) > 0 {
+		fmt.Println("  PREIMAGE:")
+		for _, r := range c.Preimage {
+			fmt.Printf("    %s\n", r)
+		}
+	}
+	if len(c.Delta) > 0 {
+		fmt.Println("  DELTA:")
+		for _, r := range c.Delta {
+			fmt.Printf("    %s\n", r)
+		}
+	}
+	if len(c.Postimage) > 0 {
+		fmt.Println("  POSTIMAGE:")
+		for _, r := range c.Postimage {
+			fmt.Printf("    %s\n", r)
+		}
+	}
+	fmt.Println()
 }
