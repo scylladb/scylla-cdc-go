@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 
 	"github.com/gocql/gocql"
@@ -14,6 +15,7 @@ import (
 )
 
 // TODO: Escape field names?
+// TODO: Tuple support
 
 func main() {
 	var (
@@ -29,21 +31,48 @@ func main() {
 	flag.StringVar(&destination, "destination", "", "address of a node in destination cluster")
 	flag.Parse()
 
+	finishFunc, err := RunReplicator(context.Background(), keyspace, table, source, destination)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	// React to Ctrl+C signal, and stop gracefully after the first signal
+	// Second signal exits the process
+	// TODO: The stopping process here could be a little nicer
+	signalC := make(chan os.Signal)
+	go func() {
+		<-signalC
+		go func() {
+			err := finishFunc()
+			if err != nil {
+				log.Fatalln(err)
+			}
+			os.Exit(0)
+		}()
+
+		<-signalC
+		os.Exit(1)
+	}()
+	signal.Notify(signalC, os.Interrupt)
+}
+
+func RunReplicator(ctx context.Context, keyspace, table, source, destination string) (func() error, error) {
 	// Configure a session for the destination cluster
 	destinationCluster := gocql.NewCluster(destination)
 	destinationSession, err := destinationCluster.CreateSession()
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
-	defer destinationSession.Close()
 
 	kmeta, err := destinationSession.KeyspaceMetadata(keyspace)
 	if err != nil {
-		log.Fatal(err)
+		destinationSession.Close()
+		return nil, err
 	}
 	tmeta, ok := kmeta.Tables[table]
 	if !ok {
-		log.Fatalf("table %s does not exist", table)
+		destinationSession.Close()
+		return nil, fmt.Errorf("table %s does not exist", table)
 	}
 	replicator := NewDeltaReplicator(destinationSession, tmeta)
 
@@ -54,9 +83,9 @@ func main() {
 	cluster.PoolConfig.HostSelectionPolicy = tracker
 	session, err := cluster.CreateSession()
 	if err != nil {
-		log.Fatal(err)
+		destinationSession.Close()
+		return nil, err
 	}
-	defer session.Close()
 
 	// Configuration for the CDC reader
 	cfg := &scylla_cdc.ReaderConfig{
@@ -71,24 +100,22 @@ func main() {
 
 	reader, err := scylla_cdc.NewReader(cfg)
 	if err != nil {
-		log.Fatal(err)
+		session.Close()
+		destinationSession.Close()
+		return nil, err
 	}
 
-	// React to Ctrl+C signal, and stop gracefully after the first signal
-	// Second signal exits the process
-	signalC := make(chan os.Signal)
+	errC := make(chan error)
 	go func() {
-		<-signalC
-		reader.Stop()
-
-		<-signalC
-		os.Exit(1)
+		errC <- reader.Run(ctx)
 	}()
-	signal.Notify(signalC, os.Interrupt)
 
-	if err := reader.Run(context.Background()); err != nil {
-		log.Fatal(err)
-	}
+	return func() error {
+		reader.Stop()
+		session.Close()
+		destinationSession.Close()
+		return <-errC
+	}, nil
 }
 
 type DeltaReplicator struct {
@@ -96,16 +123,23 @@ type DeltaReplicator struct {
 	tableName   string
 	consistency gocql.Consistency
 
-	pkColumns    []string
-	ckColumns    []string
-	otherColumns []string
-	allColumns   []string
+	pkColumns        []string
+	ckColumns        []string
+	otherColumns     []string
+	otherColumnTypes []TypeInfo
+	allColumns       []string
 
 	insertQueryStr          string
 	updateQueryStr          string
+	perColumnUpdateQueries  []updateQuerySet
 	rowDeleteQueryStr       string
 	partitionDeleteQueryStr string
 	rangeDeleteQueryStrs    []string
+}
+
+type updateQuerySet struct {
+	add    string
+	remove string
 }
 
 func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata) *DeltaReplicator {
@@ -127,24 +161,86 @@ func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata) *Delt
 		}
 	}
 
+	otherColumnTypes := make([]TypeInfo, 0, len(otherColumns))
+	for _, colName := range otherColumns {
+		info := parseType(meta.Columns[colName].Type)
+		otherColumnTypes = append(otherColumnTypes, info)
+	}
+
 	dr := &DeltaReplicator{
 		session:     session,
 		tableName:   meta.Keyspace + "." + meta.Name,
 		consistency: gocql.Quorum,
 
-		pkColumns:    pkColumns,
-		ckColumns:    ckColumns,
-		otherColumns: otherColumns,
-		allColumns:   append([]string{}, meta.OrderedColumns...),
+		pkColumns:        pkColumns,
+		ckColumns:        ckColumns,
+		otherColumns:     otherColumns,
+		otherColumnTypes: otherColumnTypes,
+		allColumns:       append(append(append([]string{}, otherColumns...), pkColumns...), ckColumns...),
 	}
 
 	dr.computeInsertQuery()
-	dr.computeUpdateQuery()
+	dr.computeUpdateQueries()
 	dr.computeRowDeleteQuery()
 	dr.computePartitionDeleteQuery()
 	dr.computeRangeDeleteQueries()
 
 	return dr
+}
+
+func (r *DeltaReplicator) computeUpdateQueries() {
+	// Compute the regular update query
+	assignments := makeBindMarkerAssignments(r.otherColumns)
+
+	keyColumns := append(append([]string{}, r.pkColumns...), r.ckColumns...)
+	conditions := makeBindMarkerAssignments(keyColumns)
+
+	r.updateQueryStr = fmt.Sprintf(
+		"UPDATE %s USING TTL ? SET %s WHERE %s",
+		r.tableName,
+		assignments,
+		conditions,
+	)
+
+	// Compute per-column update queries (only for non-frozen collections)
+	queries := make([]updateQuerySet, len(r.otherColumns))
+	for i, colName := range r.otherColumns {
+		typ := r.otherColumnTypes[i]
+		if typ.IsFrozen() {
+			continue
+		}
+
+		switch typ.Type() {
+		case TypeList:
+			queries[i].add = fmt.Sprintf(
+				"UPDATE %s USING TTL ? SET %s[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE %s",
+				r.tableName,
+				colName,
+				conditions,
+			)
+			queries[i].remove = fmt.Sprintf(
+				"UPDATE %s USING TTL ? AND TIMESTAMP ? SET %s = null WHERE %s",
+				r.tableName,
+				colName,
+				conditions,
+			)
+		case TypeMap, TypeSet:
+			queries[i].add = fmt.Sprintf(
+				"UPDATE %s USING TTL ? SET %s = %s + ? WHERE %s",
+				r.tableName,
+				colName, colName,
+				conditions,
+			)
+			queries[i].remove = fmt.Sprintf(
+				"UPDATE %s USING TTL ? SET %s = %s - ? WHERE %s",
+				r.tableName,
+				colName, colName,
+				conditions,
+			)
+		}
+	}
+
+	r.perColumnUpdateQueries = queries
 }
 
 func (r *DeltaReplicator) computeInsertQuery() {
@@ -156,20 +252,6 @@ func (r *DeltaReplicator) computeInsertQuery() {
 		r.tableName,
 		namesTuple,
 		valueMarkersTuple,
-	)
-}
-
-func (r *DeltaReplicator) computeUpdateQuery() {
-	assignments := makeBindMarkerAssignments(r.otherColumns)
-
-	keyColumns := append(append([]string{}, r.pkColumns...), r.ckColumns...)
-	conditions := makeBindMarkerAssignments(keyColumns)
-
-	r.updateQueryStr = fmt.Sprintf(
-		"UPDATE %s USING TTL ? SET %s WHERE %s",
-		r.tableName,
-		assignments,
-		conditions,
 	)
 }
 
@@ -229,12 +311,12 @@ func (r *DeltaReplicator) Consume(c scylla_cdc.Change) {
 	for pos < len(c.Delta) {
 		change := c.Delta[pos]
 		switch change.GetOperation() {
-		case scylla_cdc.Insert:
-			r.processInsert(timestamp, change)
-			pos++
-
 		case scylla_cdc.Update:
 			r.processUpdate(timestamp, change)
+			pos++
+
+		case scylla_cdc.Insert:
+			r.processInsert(timestamp, change)
 			pos++
 
 		case scylla_cdc.RowDelete:
@@ -258,45 +340,173 @@ func (r *DeltaReplicator) Consume(c scylla_cdc.Change) {
 	}
 }
 
-func (r *DeltaReplicator) processInsert(timestamp int64, c *scylla_cdc.ChangeRow) {
-	// TODO: Cache vals?
-	vals := make([]interface{}, 0, len(r.allColumns)+1)
-	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
-	vals = appendKeyValuesToBind(vals, r.ckColumns, c)
-	vals = appendRegularValuesToBind(vals, r.otherColumns, c)
-	vals = append(vals, c.GetTTL())
+func (r *DeltaReplicator) processUpdate(timestamp int64, c *scylla_cdc.ChangeRow) {
 
-	// TODO: Propagate errors
-	err := r.session.
-		Query(r.insertQueryStr, vals...).
-		Consistency(r.consistency).
-		Idempotent(true).
-		WithTimestamp(timestamp).
-		Exec()
-	if err != nil {
-		fmt.Printf("ERROR while trying to insert: %s\n", err)
-	}
+	r.processInsertOrUpdate(timestamp, false, c)
 }
 
-func (r *DeltaReplicator) processUpdate(timestamp int64, c *scylla_cdc.ChangeRow) {
-	// TODO: Cache vals?
-	// TODO: Collection updates
-	// Those should be done using batches, I think
-	vals := make([]interface{}, 1, len(r.allColumns)+1)
-	vals[0] = c.GetTTL()
-	vals = appendRegularValuesToBind(vals, r.otherColumns, c)
-	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
-	vals = appendKeyValuesToBind(vals, r.ckColumns, c)
+func (r *DeltaReplicator) processInsert(timestamp int64, c *scylla_cdc.ChangeRow) {
+	r.processInsertOrUpdate(timestamp, true, c)
+}
 
-	// TODO: Propagate errors
-	err := r.session.
-		Query(r.updateQueryStr, vals...).
-		Consistency(r.consistency).
-		Idempotent(true).
-		WithTimestamp(timestamp).
-		Exec()
+func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, c *scylla_cdc.ChangeRow) {
+	overwriteVals := make([]interface{}, 0, len(r.allColumns)+1)
+	doRegularUpdate := false
+
+	if !isInsert {
+		// In UPDATE, the TTL goes first
+		overwriteVals = append(overwriteVals, c.GetTTL())
+	}
+
+	batch := gocql.NewBatch(gocql.UnloggedBatch)
+
+	for i, colName := range r.otherColumns {
+		typ := r.otherColumnTypes[i]
+		isNonFrozenCollection := !typ.IsFrozen() && typ.Type().IsCollection()
+
+		v, hasV := c.GetValue(colName)
+		isDeleted := c.IsDeleted(colName)
+
+		if !isNonFrozenCollection {
+			if isDeleted {
+				overwriteVals = append(overwriteVals, nil)
+			} else {
+				doRegularUpdate = true
+				if hasV {
+					overwriteVals = append(overwriteVals, v)
+				} else {
+					overwriteVals = append(overwriteVals, gocql.UnsetValue)
+				}
+			}
+		} else {
+			pcuq := &r.perColumnUpdateQueries[i]
+			rDelEls := reflect.ValueOf(c.GetDeletedElements(colName))
+			delElsLen := rDelEls.Len()
+			if typ.Type() == TypeList {
+				if isDeleted {
+					// The list may be overwritten
+					// We realize it in two operations: clear + append
+					//
+					// We can't just do UPDATE SET l = [...],
+					// because we need to precisely control timestamps
+					// of the list cells. This can be done only by
+					// UPDATE SET l[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ?,
+					// which is equivalent to an append of one cell.
+					// Hence, the need for clear + append.
+					//
+					// We clear using a timestamp one-less-than the real
+					// timestamp of the write. This is what Cassandra/Scylla
+					// does internally, so it's OK to for us to do that.
+
+					clearVals := make([]interface{}, 2, len(r.pkColumns)+len(r.ckColumns)+2)
+					clearVals[0] = c.GetTTL()
+					clearVals[1] = timestamp
+					if hasV {
+						clearVals[1] = timestamp - 1
+					}
+					clearVals = appendKeyValuesToBind(clearVals, r.pkColumns, c)
+					clearVals = appendKeyValuesToBind(clearVals, r.ckColumns, c)
+					fmt.Println(pcuq.remove)
+					fmt.Println(clearVals...)
+					batch.Query(pcuq.remove, clearVals...)
+				}
+				if hasV {
+					// Append to the list
+					rv := reflect.ValueOf(v)
+					iter := rv.MapRange()
+					for iter.Next() {
+						key := iter.Key().Interface()
+						val := iter.Value().Interface()
+
+						setVals := make([]interface{}, 3, len(r.pkColumns)+len(r.ckColumns)+3)
+						setVals[0] = c.GetTTL()
+						setVals[1] = key
+						setVals[2] = val
+						setVals = appendKeyValuesToBind(setVals, r.pkColumns, c)
+						setVals = appendKeyValuesToBind(setVals, r.ckColumns, c)
+						fmt.Println(pcuq.add)
+						fmt.Println(setVals...)
+						batch.Query(pcuq.add, setVals...)
+					}
+				}
+				if delElsLen != 0 {
+					// Remove from the list
+					for i := 0; i < delElsLen; i++ {
+						setVals := make([]interface{}, 3, len(r.pkColumns)+len(r.ckColumns)+3)
+						setVals[0] = c.GetTTL()
+						setVals[1] = rDelEls.Index(i).Interface()
+						setVals[2] = nil
+						setVals = appendKeyValuesToBind(setVals, r.pkColumns, c)
+						setVals = appendKeyValuesToBind(setVals, r.ckColumns, c)
+						fmt.Println(pcuq.add)
+						fmt.Println(setVals...)
+						batch.Query(pcuq.add, setVals...)
+					}
+				}
+			} else {
+				if hasV {
+					if isDeleted {
+						// The value of the collection is being overwritten
+						overwriteVals = append(overwriteVals, v)
+					} else {
+						// We are appending to the collection
+						addVals := make([]interface{}, 2, len(r.pkColumns)+len(r.ckColumns)+2)
+						addVals[0] = c.GetTTL()
+						addVals[1] = v
+						addVals = appendKeyValuesToBind(addVals, r.pkColumns, c)
+						addVals = appendKeyValuesToBind(addVals, r.ckColumns, c)
+						fmt.Println(pcuq.add)
+						fmt.Println(addVals...)
+						batch.Query(pcuq.add, addVals...)
+					}
+				} else if isDeleted {
+					// Collection is being reset to nil
+					overwriteVals = append(overwriteVals, nil)
+				}
+				if delElsLen != 0 {
+					subVals := make([]interface{}, 2, len(r.pkColumns)+len(r.ckColumns)+2)
+					subVals[0] = c.GetTTL()
+					subVals[1] = v
+					subVals = appendKeyValuesToBind(subVals, r.pkColumns, c)
+					subVals = appendKeyValuesToBind(subVals, r.ckColumns, c)
+					fmt.Println(pcuq.remove)
+					fmt.Println(subVals...)
+					batch.Query(pcuq.remove, subVals...)
+				}
+			}
+		}
+	}
+
+	if doRegularUpdate {
+		overwriteVals = appendKeyValuesToBind(overwriteVals, r.pkColumns, c)
+		overwriteVals = appendKeyValuesToBind(overwriteVals, r.ckColumns, c)
+
+		if isInsert {
+			// In INSERT, the TTL goes at the end
+			overwriteVals = append(overwriteVals, c.GetTTL())
+		}
+
+		if isInsert {
+			fmt.Println(r.insertQueryStr)
+			fmt.Println(overwriteVals...)
+			batch.Query(r.insertQueryStr, overwriteVals...)
+		} else {
+			fmt.Println(r.updateQueryStr)
+			fmt.Println(overwriteVals...)
+			batch.Query(r.updateQueryStr, overwriteVals...)
+		}
+	}
+
+	batch.SetConsistency(r.consistency)
+	batch.WithTimestamp(timestamp)
+
+	err := r.session.ExecuteBatch(batch)
 	if err != nil {
-		fmt.Printf("ERROR while trying to update: %s\n", err)
+		typ := "update"
+		if isInsert {
+			typ = "insert"
+		}
+		fmt.Printf("ERROR while trying to %s: %s\n", typ, err)
 	}
 }
 
@@ -305,6 +515,9 @@ func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.Change
 	vals := make([]interface{}, 0, len(r.pkColumns)+len(r.ckColumns))
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
 	vals = appendKeyValuesToBind(vals, r.ckColumns, c)
+
+	fmt.Println(r.rowDeleteQueryStr)
+	fmt.Println(vals...)
 
 	// TODO: Propagate errors
 	err := r.session.
@@ -322,6 +535,9 @@ func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.
 	// TODO: Cache vals?
 	vals := make([]interface{}, 0, len(r.pkColumns))
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
+
+	fmt.Println(r.partitionDeleteQueryStr)
+	fmt.Println(vals...)
 
 	// TODO: Propagate errors
 	err := r.session.
@@ -407,6 +623,9 @@ func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla
 	queryIdx := 8*baseIdx + leftOff + 3*rightOff
 	queryStr := r.rangeDeleteQueryStrs[queryIdx]
 
+	fmt.Println(queryStr)
+	fmt.Println(vals...)
+
 	// TODO: Propagate errors
 	err := r.session.
 		Query(queryStr, vals...).
@@ -437,29 +656,12 @@ func appendKeyValuesToBind(
 	names []string,
 	c *scylla_cdc.ChangeRow,
 ) []interface{} {
+	// No need to handle non-frozen lists here, because they can't appear
+	// in either partition or clustering key
 	for _, name := range names {
 		v, ok := c.GetValue(name)
 		if !ok {
 			v = gocql.UnsetValue
-		}
-		vals = append(vals, v)
-	}
-	return vals
-}
-
-func appendRegularValuesToBind(
-	vals []interface{},
-	names []string,
-	c *scylla_cdc.ChangeRow,
-) []interface{} {
-	for _, name := range names {
-		v, ok := c.GetValue(name)
-		if !ok {
-			if c.IsDeleted(name) {
-				v = nil
-			} else {
-				v = gocql.UnsetValue
-			}
 		}
 		vals = append(vals, v)
 	}

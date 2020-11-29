@@ -48,7 +48,7 @@ func (ot OperationType) String() string {
 	case PostImage:
 		return "POSTIMAGE"
 	default:
-		return "wrong OperationType"
+		return "(wrong OperationType)"
 	}
 }
 

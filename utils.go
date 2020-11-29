@@ -4,7 +4,7 @@ import (
 	"github.com/gocql/gocql"
 )
 
-func compareTimeuuid(u1 gocql.UUID, u2 gocql.UUID) int {
+func CompareTimeuuid(u1 gocql.UUID, u2 gocql.UUID) int {
 	// Compare timestamps
 	t1 := u1.Timestamp()
 	t2 := u2.Timestamp()
