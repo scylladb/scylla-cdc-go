@@ -17,6 +17,8 @@ import (
 // TODO: Escape field names?
 // TODO: Tuple support
 
+var debugQueries = true
+
 func main() {
 	var (
 		keyspace    string
@@ -54,6 +56,8 @@ func main() {
 		os.Exit(1)
 	}()
 	signal.Notify(signalC, os.Interrupt)
+
+	select {}
 }
 
 func RunReplicator(ctx context.Context, keyspace, table, source, destination string) (func() error, error) {
@@ -190,10 +194,10 @@ func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata) *Delt
 
 func (r *DeltaReplicator) computeUpdateQueries() {
 	// Compute the regular update query
-	assignments := makeBindMarkerAssignments(r.otherColumns)
+	assignments := makeBindMarkerAssignments(r.otherColumns, ", ")
 
 	keyColumns := append(append([]string{}, r.pkColumns...), r.ckColumns...)
-	conditions := makeBindMarkerAssignments(keyColumns)
+	conditions := makeBindMarkerAssignments(keyColumns, " AND ")
 
 	r.updateQueryStr = fmt.Sprintf(
 		"UPDATE %s USING TTL ? SET %s WHERE %s",
@@ -261,7 +265,7 @@ func (r *DeltaReplicator) computeRowDeleteQuery() {
 	r.rowDeleteQueryStr = fmt.Sprintf(
 		"DELETE FROM %s WHERE %s",
 		r.tableName,
-		makeBindMarkerAssignments(keyColumns),
+		makeBindMarkerAssignments(keyColumns, " AND "),
 	)
 }
 
@@ -269,7 +273,7 @@ func (r *DeltaReplicator) computePartitionDeleteQuery() {
 	r.partitionDeleteQueryStr = fmt.Sprintf(
 		"DELETE FROM %s WHERE %s",
 		r.tableName,
-		makeBindMarkerAssignments(r.pkColumns),
+		makeBindMarkerAssignments(r.pkColumns, " AND "),
 	)
 }
 
@@ -281,7 +285,7 @@ func (r *DeltaReplicator) computeRangeDeleteQueries() {
 
 	for _, ckCol := range r.ckColumns {
 		for typ := 0; typ < 8; typ++ {
-			startOp := [3]string{">=", "=", ""}[typ%3]
+			startOp := [3]string{">=", ">", ""}[typ%3]
 			endOp := [3]string{"<=", "<", ""}[typ/3]
 			condsWithBounds := eqConds
 			if startOp != "" {
@@ -351,7 +355,6 @@ func (r *DeltaReplicator) processInsert(timestamp int64, c *scylla_cdc.ChangeRow
 
 func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, c *scylla_cdc.ChangeRow) {
 	overwriteVals := make([]interface{}, 0, len(r.allColumns)+1)
-	doRegularUpdate := false
 
 	if !isInsert {
 		// In UPDATE, the TTL goes first
@@ -371,7 +374,6 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 			if isDeleted {
 				overwriteVals = append(overwriteVals, nil)
 			} else {
-				doRegularUpdate = true
 				if hasV {
 					overwriteVals = append(overwriteVals, v)
 				} else {
@@ -383,6 +385,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 			rDelEls := reflect.ValueOf(c.GetDeletedElements(colName))
 			delElsLen := rDelEls.Len()
 			if typ.Type() == TypeList {
+				overwriteVals = append(overwriteVals, gocql.UnsetValue)
 				if isDeleted {
 					// The list may be overwritten
 					// We realize it in two operations: clear + append
@@ -406,8 +409,10 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 					}
 					clearVals = appendKeyValuesToBind(clearVals, r.pkColumns, c)
 					clearVals = appendKeyValuesToBind(clearVals, r.ckColumns, c)
-					fmt.Println(pcuq.remove)
-					fmt.Println(clearVals...)
+					if debugQueries {
+						fmt.Println(pcuq.remove)
+						fmt.Println(clearVals...)
+					}
 					batch.Query(pcuq.remove, clearVals...)
 				}
 				if hasV {
@@ -424,8 +429,10 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 						setVals[2] = val
 						setVals = appendKeyValuesToBind(setVals, r.pkColumns, c)
 						setVals = appendKeyValuesToBind(setVals, r.ckColumns, c)
-						fmt.Println(pcuq.add)
-						fmt.Println(setVals...)
+						if debugQueries {
+							fmt.Println(pcuq.add)
+							fmt.Println(setVals...)
+						}
 						batch.Query(pcuq.add, setVals...)
 					}
 				}
@@ -438,8 +445,10 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 						setVals[2] = nil
 						setVals = appendKeyValuesToBind(setVals, r.pkColumns, c)
 						setVals = appendKeyValuesToBind(setVals, r.ckColumns, c)
-						fmt.Println(pcuq.add)
-						fmt.Println(setVals...)
+						if debugQueries {
+							fmt.Println(pcuq.add)
+							fmt.Println(setVals...)
+						}
 						batch.Query(pcuq.add, setVals...)
 					}
 				}
@@ -455,24 +464,47 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 						addVals[1] = v
 						addVals = appendKeyValuesToBind(addVals, r.pkColumns, c)
 						addVals = appendKeyValuesToBind(addVals, r.ckColumns, c)
-						fmt.Println(pcuq.add)
-						fmt.Println(addVals...)
+						if debugQueries {
+							fmt.Println(pcuq.add)
+							fmt.Println(addVals...)
+						}
 						batch.Query(pcuq.add, addVals...)
+						overwriteVals = append(overwriteVals, gocql.UnsetValue)
 					}
 				} else if isDeleted {
 					// Collection is being reset to nil
 					overwriteVals = append(overwriteVals, nil)
+				} else {
+					overwriteVals = append(overwriteVals, gocql.UnsetValue)
 				}
 				if delElsLen != 0 {
 					subVals := make([]interface{}, 2, len(r.pkColumns)+len(r.ckColumns)+2)
 					subVals[0] = c.GetTTL()
-					subVals[1] = v
+					subVals[1] = rDelEls.Interface()
 					subVals = appendKeyValuesToBind(subVals, r.pkColumns, c)
 					subVals = appendKeyValuesToBind(subVals, r.ckColumns, c)
-					fmt.Println(pcuq.remove)
-					fmt.Println(subVals...)
+					if debugQueries {
+						fmt.Println(pcuq.remove)
+						fmt.Println(subVals...)
+					}
 					batch.Query(pcuq.remove, subVals...)
 				}
+			}
+		}
+	}
+
+	var doRegularUpdate bool
+
+	if isInsert {
+		// In case of INSERT, we MUST perform the insert, even if only collections
+		// are updated. This is because INSERT, contrary to UPDATE, sets the
+		// row marker.
+		doRegularUpdate = true
+	} else {
+		for _, v := range overwriteVals {
+			if v != gocql.UnsetValue {
+				doRegularUpdate = true
+				break
 			}
 		}
 	}
@@ -487,12 +519,16 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 		}
 
 		if isInsert {
-			fmt.Println(r.insertQueryStr)
-			fmt.Println(overwriteVals...)
+			if debugQueries {
+				fmt.Println(r.insertQueryStr)
+				fmt.Println(overwriteVals...)
+			}
 			batch.Query(r.insertQueryStr, overwriteVals...)
 		} else {
-			fmt.Println(r.updateQueryStr)
-			fmt.Println(overwriteVals...)
+			if debugQueries {
+				fmt.Println(r.updateQueryStr)
+				fmt.Println(overwriteVals...)
+			}
 			batch.Query(r.updateQueryStr, overwriteVals...)
 		}
 	}
@@ -516,8 +552,10 @@ func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.Change
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
 	vals = appendKeyValuesToBind(vals, r.ckColumns, c)
 
-	fmt.Println(r.rowDeleteQueryStr)
-	fmt.Println(vals...)
+	if debugQueries {
+		fmt.Println(r.rowDeleteQueryStr)
+		fmt.Println(vals...)
+	}
 
 	// TODO: Propagate errors
 	err := r.session.
@@ -536,8 +574,10 @@ func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.
 	vals := make([]interface{}, 0, len(r.pkColumns))
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
 
-	fmt.Println(r.partitionDeleteQueryStr)
-	fmt.Println(vals...)
+	if debugQueries {
+		fmt.Println(r.partitionDeleteQueryStr)
+		fmt.Println(vals...)
+	}
 
 	// TODO: Propagate errors
 	err := r.session.
@@ -623,8 +663,10 @@ func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla
 	queryIdx := 8*baseIdx + leftOff + 3*rightOff
 	queryStr := r.rangeDeleteQueryStrs[queryIdx]
 
-	fmt.Println(queryStr)
-	fmt.Println(vals...)
+	if debugQueries {
+		fmt.Println(queryStr)
+		fmt.Println(vals...)
+	}
 
 	// TODO: Propagate errors
 	err := r.session.
@@ -646,9 +688,9 @@ func makeBindMarkerAssignmentList(columnNames []string) []string {
 	return assignments
 }
 
-func makeBindMarkerAssignments(columnNames []string) string {
+func makeBindMarkerAssignments(columnNames []string, sep string) string {
 	assignments := makeBindMarkerAssignmentList(columnNames)
-	return strings.Join(assignments, " AND ")
+	return strings.Join(assignments, sep)
 }
 
 func appendKeyValuesToBind(
