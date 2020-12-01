@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -17,9 +16,10 @@ type ReaderConfig struct {
 	// An active gocql session to the cluster.
 	Session *gocql.Session
 
-	// Names of the cdc log tables to read from. Must have _scylla_cdc_log suffix.
+	// Names of the tables for which to read changes. This should be the name
+	// of the base table, not the cdc log table.
 	// Can be prefixed with keyspace name.
-	LogTableNames []string
+	TableNames []string
 
 	// Consistency to use when querying CDC log
 	Consistency gocql.Consistency
@@ -55,11 +55,11 @@ type AdvancedReaderConfig struct {
 func NewReaderConfig(
 	session *gocql.Session,
 	consumer ChangeConsumer,
-	logTableNames ...string,
+	tableNames ...string,
 ) *ReaderConfig {
 	return &ReaderConfig{
 		Session:        session,
-		LogTableNames:  logTableNames,
+		TableNames:     tableNames,
 		Consistency:    gocql.Quorum,
 		ChangeConsumer: consumer,
 
@@ -101,12 +101,6 @@ type Reader struct {
 func NewReader(config *ReaderConfig) (*Reader, error) {
 	if config.Logger == nil {
 		config.Logger = &noLogger{}
-	}
-
-	for _, tableName := range config.LogTableNames {
-		if !strings.HasSuffix(tableName, cdcTableSuffix) {
-			return nil, ErrNotALogTable
-		}
 	}
 
 	readFrom := time.Now().Add(-config.Advanced.ChangeAgeLimit)
@@ -170,8 +164,8 @@ func (r *Reader) Run(ctx context.Context) error {
 
 			genErrG, genCtx := errgroup.WithContext(runCtx)
 
-			readers := make([]*streamBatchReader, 0, len(split)*len(r.config.LogTableNames))
-			for _, tableName := range r.config.LogTableNames {
+			readers := make([]*streamBatchReader, 0, len(split)*len(r.config.TableNames))
+			for _, tableName := range r.config.TableNames {
 				for _, group := range split {
 					readers = append(readers, newStreamBatchReader(
 						r.config,

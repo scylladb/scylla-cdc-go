@@ -97,8 +97,8 @@ func RunReplicator(
 			destinationSession.Close()
 			return nil, fmt.Errorf("table %s does not exist", tableName)
 		}
-		tableReplicators[tableName+"_scylla_cdc_log"] = NewDeltaReplicator(destinationSession, tmeta)
-		logTableNames = append(logTableNames, tableName+"_scylla_cdc_log")
+		tableReplicators[tableName] = NewDeltaReplicator(destinationSession, tmeta)
+		logTableNames = append(logTableNames, tableName)
 	}
 
 	replicator := &TableRoutingConsumer{tableReplicators}

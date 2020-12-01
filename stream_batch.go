@@ -11,9 +11,9 @@ import (
 )
 
 type streamBatchReader struct {
-	config    *ReaderConfig
-	streams   []stream
-	tableName string
+	config        *ReaderConfig
+	streams       []stream
+	baseTableName string
 
 	lastTimestamp gocql.UUID
 	endTimestamp  atomic.Value
@@ -24,13 +24,13 @@ type streamBatchReader struct {
 func newStreamBatchReader(
 	config *ReaderConfig,
 	streams []stream,
-	tableName string,
+	baseTableName string,
 	startFrom gocql.UUID,
 ) *streamBatchReader {
 	return &streamBatchReader{
-		config:    config,
-		streams:   streams,
-		tableName: tableName,
+		config:        config,
+		streams:       streams,
+		baseTableName: baseTableName,
 
 		lastTimestamp: startFrom,
 
@@ -48,9 +48,10 @@ func (sbr *streamBatchReader) run(ctx context.Context) (gocql.UUID, error) {
 	}
 
 	// Set up the query
+	logTableName := sbr.baseTableName + cdcTableSuffix
 	queryString := fmt.Sprintf(
 		"SELECT * FROM %s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" < ? BYPASS CACHE",
-		sbr.tableName, // TODO: Sanitize table name
+		logTableName, // TODO: Sanitize table name
 		pkCondition,
 	)
 	q := sbr.config.Session.Query(queryString)
@@ -105,7 +106,7 @@ outer:
 				if c.cdcCols.endOfBatch {
 					change.StreamID = streamCols.streamID
 					change.Time = streamCols.time
-					sbr.config.ChangeConsumer.Consume(sbr.tableName, change)
+					sbr.config.ChangeConsumer.Consume(sbr.baseTableName, change)
 
 					change.Preimage = nil
 					change.Delta = nil
