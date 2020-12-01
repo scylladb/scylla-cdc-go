@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+	scylla_cdc "github.com/piodul/scylla-cdc-go"
 )
 
 const (
@@ -244,13 +245,24 @@ func TestReplicator(t *testing.T) {
 		}
 	}
 
+	<-time.After(3 * time.Second)
+
 	t.Log("running replicators")
+
+	adv := scylla_cdc.AdvancedReaderConfig{
+		ChangeAgeLimit:         time.Minute,
+		PostNonEmptyQueryDelay: 500 * time.Millisecond,
+		PostEmptyQueryDelay:    500 * time.Millisecond,
+		PostFailedQueryDelay:   500 * time.Millisecond,
+		QueryTimeWindowSize:    5 * time.Minute,
+		ConfidenceWindowSize:   0,
+	}
 
 	// TODO: Make it possible for the replicator to replicate multiple tables simultaneously
 	enders := make([]func() error, 0, 0)
 	for tbl := range schemas {
 		tbl = strings.Split(tbl, ".")[1]
-		finishF, err := RunReplicator(context.Background(), "ks", tbl, sourceAddress, destinationAddress)
+		finishF, err := RunReplicator(context.Background(), "ks", tbl, sourceAddress, destinationAddress, &adv)
 		if err != nil {
 			t.Fatal(err)
 		}

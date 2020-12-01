@@ -17,31 +17,63 @@ type ReaderConfig struct {
 	// An active gocql session to the cluster.
 	Session *gocql.Session
 
-	// Consistency to use when querying CDC log
-	Consistency gocql.Consistency
-
 	// The name of the cdc log table name. Must have _scylla_cdc_log suffix.
 	// Can be prefixed with keyspace name.
 	LogTableName string
 
-	// Determines by how much to offset time lower bound of the query when reading from CDC log.
-	// For more information about this option, see README.
-	LowerBoundReadOffset time.Duration
+	// Consistency to use when querying CDC log
+	Consistency gocql.Consistency
 
-	// When polling from CDC log, only rows with timestamps lower than Now - UpperBoundReadOffset are requested.
-	// For more information about this option, see README.
-	UpperBoundReadOffset time.Duration
+	// A callback which processes information fetched from the CDC log.
+	ChangeConsumer ChangeConsumer
 
 	// An object which tracks cluster metadata such as current tokens and node count.
 	// While this object is optional, it is highly recommended that this field points to a valid ClusterStateTracker.
 	// For usage, refer to the example application.
 	ClusterStateTracker *ClusterStateTracker
 
-	// A callback which processes information fetched from the CDC log.
-	ChangeConsumer ChangeConsumer
-
 	// A logger. If set, it will receive log messages useful for debugging of the library.
 	Logger Logger
+
+	// Advanced parameters
+	Advanced AdvancedReaderConfig
+}
+
+// TODO: Document
+type AdvancedReaderConfig struct {
+	ConfidenceWindowSize time.Duration
+
+	PostNonEmptyQueryDelay time.Duration
+	PostEmptyQueryDelay    time.Duration
+	PostFailedQueryDelay   time.Duration
+
+	QueryTimeWindowSize time.Duration
+	ChangeAgeLimit      time.Duration
+}
+
+// Creates a ReaderConfig struct with safe defaults.
+func NewReaderConfig(
+	session *gocql.Session,
+	logTableName string,
+	consumer ChangeConsumer,
+) *ReaderConfig {
+	return &ReaderConfig{
+		Session:        session,
+		LogTableName:   logTableName,
+		Consistency:    gocql.Quorum,
+		ChangeConsumer: consumer,
+
+		Advanced: AdvancedReaderConfig{
+			ConfidenceWindowSize: 30 * time.Second,
+
+			PostNonEmptyQueryDelay: 10 * time.Second,
+			PostEmptyQueryDelay:    30 * time.Second,
+			PostFailedQueryDelay:   1 * time.Second,
+
+			QueryTimeWindowSize: 30 * time.Second,
+			ChangeAgeLimit:      1 * time.Minute, // TODO: Does that make sense?
+		},
+	}
 }
 
 func (rc *ReaderConfig) Copy() *ReaderConfig {
@@ -61,6 +93,7 @@ const (
 type Reader struct {
 	config     *ReaderConfig
 	genFetcher *generationFetcher
+	readFrom   time.Time
 	stoppedCh  chan struct{}
 }
 
@@ -74,10 +107,12 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 		return nil, ErrNotALogTable
 	}
 
+	readFrom := time.Now().Add(-config.Advanced.ChangeAgeLimit)
+
 	genFetcher, err := newGenerationFetcher(
 		config.Session,
 		config.ClusterStateTracker,
-		time.Now().Add(-10000*time.Hour), // TODO: We should start from a provided timestamp
+		readFrom,
 		config.Logger,
 	)
 	if err != nil {
@@ -87,6 +122,7 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 	reader := &Reader{
 		config:     config.Copy(),
 		genFetcher: genFetcher,
+		readFrom:   readFrom,
 		stoppedCh:  make(chan struct{}),
 	}
 	return reader, nil
@@ -107,20 +143,20 @@ func (r *Reader) Run(ctx context.Context) error {
 			return runCtx.Err()
 		case <-r.stoppedCh:
 		}
-		r.genFetcher.stop()
+		r.genFetcher.Stop()
 		return nil
 	})
 	runErrG.Go(func() error {
-		return r.genFetcher.run(runCtx)
+		return r.genFetcher.Run(runCtx)
 	})
 	runErrG.Go(func() error {
-		gen, err := r.genFetcher.get(runCtx)
+		gen, err := r.genFetcher.Get(runCtx)
 		if gen == nil {
 			return err
 		}
 
 		for {
-			l.Printf("starting reading from generation %v", gen.startTime)
+			l.Printf("starting reading from generation %v", r.readFrom)
 
 			// Start batch readers for this generation
 			split, err := r.splitStreams(gen.streams)
@@ -135,11 +171,10 @@ func (r *Reader) Run(ctx context.Context) error {
 			readers := make([]*streamBatchReader, 0, len(split))
 			for _, group := range split {
 				readers = append(readers, newStreamBatchReader(
-					r.config.Session,
+					r.config,
 					group,
 					r.config.LogTableName,
-					r.config.ChangeConsumer,
-					gocql.MinTimeUUID(gen.startTime), // TODO: Change to a configured timestamp
+					gocql.MinTimeUUID(r.readFrom),
 				))
 			}
 
@@ -157,7 +192,7 @@ func (r *Reader) Run(ctx context.Context) error {
 			var nextGen *generation
 			genErrG.Go(func() error {
 				var err error
-				nextGen, err = r.genFetcher.get(genCtx)
+				nextGen, err = r.genFetcher.Get(genCtx)
 				if err != nil {
 					return err
 				}
@@ -166,6 +201,7 @@ func (r *Reader) Run(ctx context.Context) error {
 						reader.stopNow()
 					} else {
 						reader.close(gocql.MaxTimeUUID(nextGen.startTime))
+						r.readFrom = nextGen.startTime
 					}
 				}
 				return nil

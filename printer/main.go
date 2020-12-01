@@ -38,16 +38,13 @@ func main() {
 	}
 	defer session.Close()
 
-	// Configuration for the CDC reader
-	cfg := &scylla_cdc.ReaderConfig{
-		Session:             session,
-		Consistency:         gocql.Quorum,
-		LogTableName:        keyspace + "." + table,
-		ChangeConsumer:      scylla_cdc.ChangeConsumerFunc(printerConsumer),
-		ClusterStateTracker: tracker,
-
-		Logger: log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
-	}
+	cfg := scylla_cdc.NewReaderConfig(
+		session,
+		keyspace+"."+table,
+		scylla_cdc.ChangeConsumerFunc(printerConsumer),
+	)
+	cfg.ClusterStateTracker = tracker
+	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
 	reader, err := scylla_cdc.NewReader(cfg)
 	if err != nil {

@@ -10,18 +10,10 @@ import (
 	"github.com/gocql/gocql"
 )
 
-const (
-	// TODO: Change into parametrs
-	confidenceWindow       = 3 * time.Second
-	postNonEmptyQueryDelay = 1 * time.Second
-	postEmptyQueryDelay    = 3 * time.Second
-)
-
 type streamBatchReader struct {
-	session   *gocql.Session
+	config    *ReaderConfig
 	streams   []stream
 	tableName string
-	consumer  ChangeConsumer
 
 	lastTimestamp gocql.UUID
 	endTimestamp  atomic.Value
@@ -30,17 +22,15 @@ type streamBatchReader struct {
 }
 
 func newStreamBatchReader(
-	session *gocql.Session,
+	config *ReaderConfig,
 	streams []stream,
 	tableName string,
-	consumer ChangeConsumer,
 	startFrom gocql.UUID,
 ) *streamBatchReader {
 	return &streamBatchReader{
-		session:   session,
+		config:    config,
 		streams:   streams,
 		tableName: tableName,
-		consumer:  consumer,
 
 		lastTimestamp: startFrom,
 
@@ -63,7 +53,7 @@ func (sbr *streamBatchReader) run(ctx context.Context) (gocql.UUID, error) {
 		sbr.tableName, // TODO: Sanitize table name
 		pkCondition,
 	)
-	q := sbr.session.Query(queryString)
+	q := sbr.config.Session.Query(queryString)
 
 	// Prepare a slice with bind arguments (most of them will be stream IDs)
 	bindArgs := make([]interface{}, len(sbr.streams)+2)
@@ -73,20 +63,31 @@ func (sbr *streamBatchReader) run(ctx context.Context) (gocql.UUID, error) {
 
 outer:
 	for {
-		confidenceWindowEnd := gocql.UUIDFromTime(time.Now().Add(-confidenceWindow))
-		if sbr.reachedEndOfTheGeneration(confidenceWindowEnd) {
-			break outer
+		timeWindowEnd := sbr.lastTimestamp.Time().Add(sbr.config.Advanced.QueryTimeWindowSize)
+		confidenceWindowEnd := time.Now().Add(-sbr.config.Advanced.ConfidenceWindowSize)
+
+		if timeWindowEnd.After(confidenceWindowEnd) {
+			timeWindowEnd = confidenceWindowEnd
 		}
 
-		hadRows := false
-		if CompareTimeuuid(sbr.lastTimestamp, confidenceWindowEnd) < 0 {
+		pollEnd := gocql.MinTimeUUID(timeWindowEnd)
+
+		var (
+			err     error
+			hadRows bool
+		)
+
+		if CompareTimeuuid(sbr.lastTimestamp, pollEnd) < 0 {
 			// Set the time interval from which we need to return data
 			bindArgs[len(bindArgs)-2] = sbr.lastTimestamp
-			bindArgs[len(bindArgs)-1] = confidenceWindowEnd
+			bindArgs[len(bindArgs)-1] = pollEnd
 			iter, err := newChangeRowIterator(q.Bind(bindArgs...).Iter())
 			if err != nil {
+				sbr.config.Logger.Printf("error while quering: %s", err)
 				return sbr.lastTimestamp, err
 			}
+
+			sbr.config.Logger.Printf("querying: %v vs %v", sbr.lastTimestamp.Time(), pollEnd.Time())
 
 			var change Change
 			for {
@@ -106,7 +107,7 @@ outer:
 				if c.cdcCols.endOfBatch {
 					change.StreamID = streamCols.streamID
 					change.Time = streamCols.time
-					sbr.consumer.Consume(change)
+					sbr.config.ChangeConsumer.Consume(change)
 
 					change.Preimage = nil
 					change.Delta = nil
@@ -121,14 +122,22 @@ outer:
 				hadRows = true
 			}
 
-			if err := iter.Close(); err != nil {
+			if err = iter.Close(); err != nil {
 				return sbr.lastTimestamp, err
 			}
 		}
 
-		delay := postNonEmptyQueryDelay
-		if !hadRows {
-			delay = postEmptyQueryDelay
+		if sbr.reachedEndOfTheGeneration(sbr.lastTimestamp) {
+			break outer
+		}
+
+		var delay time.Duration
+		if err != nil {
+			delay = sbr.config.Advanced.PostFailedQueryDelay
+		} else if hadRows {
+			delay = sbr.config.Advanced.PostNonEmptyQueryDelay
+		} else {
+			delay = sbr.config.Advanced.PostEmptyQueryDelay
 		}
 
 		delayUntil := time.Now().Add(delay)
@@ -141,7 +150,7 @@ outer:
 			case <-time.After(delayUntil.Sub(time.Now())):
 				break delay
 			case <-sbr.interruptCh:
-				if sbr.reachedEndOfTheGeneration(confidenceWindowEnd) {
+				if sbr.reachedEndOfTheGeneration(sbr.lastTimestamp) {
 					break delay
 				}
 			}

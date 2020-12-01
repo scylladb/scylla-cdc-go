@@ -33,7 +33,7 @@ func main() {
 	flag.StringVar(&destination, "destination", "", "address of a node in destination cluster")
 	flag.Parse()
 
-	finishFunc, err := RunReplicator(context.Background(), keyspace, table, source, destination)
+	finishFunc, err := RunReplicator(context.Background(), keyspace, table, source, destination, nil)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -60,7 +60,11 @@ func main() {
 	select {}
 }
 
-func RunReplicator(ctx context.Context, keyspace, table, source, destination string) (func() error, error) {
+func RunReplicator(
+	ctx context.Context,
+	keyspace, table, source, destination string,
+	advancedParams *scylla_cdc.AdvancedReaderConfig,
+) (func() error, error) {
 	// Configure a session for the destination cluster
 	destinationCluster := gocql.NewCluster(destination)
 	destinationSession, err := destinationCluster.CreateSession()
@@ -92,15 +96,16 @@ func RunReplicator(ctx context.Context, keyspace, table, source, destination str
 	}
 
 	// Configuration for the CDC reader
-	cfg := &scylla_cdc.ReaderConfig{
-		Session:             session,
-		Consistency:         gocql.Quorum,
-		LogTableName:        keyspace + "." + table + "_scylla_cdc_log",
-		ChangeConsumer:      replicator,
-		ClusterStateTracker: tracker,
-
-		Logger: log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
+	cfg := scylla_cdc.NewReaderConfig(
+		session,
+		keyspace+"."+table+"_scylla_cdc_log",
+		replicator,
+	)
+	if advancedParams != nil {
+		cfg.Advanced = *advancedParams
 	}
+	cfg.ClusterStateTracker = tracker
+	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
 	reader, err := scylla_cdc.NewReader(cfg)
 	if err != nil {
@@ -116,9 +121,10 @@ func RunReplicator(ctx context.Context, keyspace, table, source, destination str
 
 	return func() error {
 		reader.Stop()
+		err := <-errC
 		session.Close()
 		destinationSession.Close()
-		return <-errC
+		return err
 	}, nil
 }
 

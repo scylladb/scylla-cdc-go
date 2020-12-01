@@ -6,11 +6,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"time"
 
 	"github.com/gocql/gocql"
 	scylla_cdc "github.com/piodul/scylla-cdc-go"
 )
+
+// TODO: Remove?
 
 func main() {
 	// This wrapper around HostSelectionPolicy is used in order to forward information about the cluster topology
@@ -34,13 +35,6 @@ func main() {
 		LogTableName:        "ks.tbl_scylla_cdc_log",
 		ChangeConsumer:      scylla_cdc.ChangeConsumerFunc(simpleConsumer),
 		ClusterStateTracker: tracker,
-
-		// Those two are the main knobs that control library's polling strategy.
-		// Refer to the README for information on how to configure them.
-		//
-		// This configuration represents the first strategy (quick processing, with duplicates).
-		LowerBoundReadOffset: 3 * time.Second,
-		UpperBoundReadOffset: 0,
 
 		Logger: log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
 	}

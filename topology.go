@@ -27,6 +27,9 @@ var (
 )
 
 const (
+	// TODO: Switch to a model which reacts to cluster state changes
+	// and forces a refresh when all worker goroutines did not report any
+	// changes for some time
 	generationFetchPeriod time.Duration = 15 * time.Second
 )
 
@@ -58,6 +61,8 @@ type generationFetcher struct {
 	lastTime       time.Time
 	logger         Logger
 
+	consistency gocql.Consistency
+
 	generationCh chan *generation
 	refreshCh    chan struct{}
 	stopCh       chan struct{}
@@ -74,25 +79,10 @@ func newGenerationFetcher(
 		return nil, err
 	}
 
-	gf := &generationFetcher{
-		session:        session,
-		clusterTracker: clusterTracker,
-		genTableName:   tableName,
-		lastTime:       startFrom,
-		logger:         logger,
-
-		generationCh: make(chan *generation),
-		stopCh:       make(chan struct{}),
-		refreshCh:    make(chan struct{}, 1),
-	}
-	return gf, nil
-}
-
-func (gf *generationFetcher) run(ctx context.Context) error {
 	// Detect consistency, based on the cluster size
 	clusterSize := 1
-	if gf.clusterTracker != nil {
-		clusterSize = gf.clusterTracker.GetClusterSize()
+	if clusterTracker != nil {
+		clusterSize = clusterTracker.GetClusterSize()
 	}
 
 	consistency := gocql.One
@@ -102,57 +92,62 @@ func (gf *generationFetcher) run(ctx context.Context) error {
 		consistency = gocql.All
 	}
 
-	// Prepare the query
-	queryString := fmt.Sprintf("SELECT time, streams FROM %s WHERE time > ? ALLOW FILTERING", gf.genTableName)
-	q := gf.session.Query(queryString).Consistency(consistency)
+	gf := &generationFetcher{
+		session:        session,
+		clusterTracker: clusterTracker,
+		genTableName:   tableName,
+		lastTime:       startFrom,
+		logger:         logger,
 
-	ticker := time.NewTicker(generationFetchPeriod)
+		consistency: consistency,
 
-	// We want to be able to reset the ticker by re-creating it
-	// Therefore we can't write `defer ticker.Stop()` because it will bind
-	// the deferred invocation to the current `ticker, not the one that is
-	// assigned to the `ticker` variable
-	defer func() {
-		ticker.Stop()
-	}()
+		generationCh: make(chan *generation),
+		stopCh:       make(chan struct{}),
+		refreshCh:    make(chan struct{}, 1),
+	}
+	return gf, nil
+}
 
+func (gf *generationFetcher) Run(ctx context.Context) error {
 	l := gf.logger
-	l.Printf("starting generation fetcher loop")
 
+	queryGensUpToTime := gf.session.Query(fmt.Sprintf("SELECT time, streams FROM %s WHERE time <= ? ALLOW FILTERING", gf.genTableName))
+	queryGensAfterTime := gf.session.Query(fmt.Sprintf("SELECT time, streams FROM %s WHERE time > ? ALLOW FILTERING", gf.genTableName))
+
+	// Find the generation which contains the timestamp from which we should
+	// start reading
+	gl, err := gf.fetchFromGenerationsTable(queryGensUpToTime, gf.lastTime)
+	if err != nil {
+		return err
+	}
+
+	if len(gl) > 0 {
+		first := gl[len(gl)-1]
+
+		if shouldStop := gf.pushGeneration(first); shouldStop {
+			return nil
+		}
+	}
+
+	// Periodically poll for newer generations
+	l.Printf("starting generation fetcher loop")
 outer:
 	for {
-		var gl generationList
+		// Generation processing can take some time, so start calculating
+		// the next poll time starting from now
+		waitC := time.After(generationFetchPeriod)
 
 		// See if there are any new generations
-		iter := q.Bind(gf.lastTime).Iter()
-		for {
-			gen := &generation{}
-			if !iter.Scan(&gen.startTime, &gen.streams) {
-				break
-			}
-			gl = append(gl, gen)
-		}
-
-		if err := iter.Close(); err != nil {
+		gl, err := gf.fetchFromGenerationsTable(queryGensAfterTime, gf.lastTime)
+		if err != nil {
+			// TODO: Retry it later
 			return err
-		}
-
-		sort.Sort(gl)
-
-		if len(gl) > 0 {
-			l.Printf("poll returned %d new generations", len(gl))
-
-			// Save the timestamp of the oldest generation
-			gf.lastTime = gl[len(gl)-1].startTime
 		}
 
 		// Push generations that we fetched to generationCh
 		for _, g := range gl {
-			l.Printf("pushing generation %v", g.startTime)
-			select {
-			case <-gf.stopCh:
-				break outer
-			case gf.generationCh <- g:
+			if shouldStop := gf.pushGeneration(g); shouldStop {
+				break
 			}
 		}
 
@@ -168,12 +163,8 @@ outer:
 				break outer
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-ticker.C:
+			case <-waitC:
 			case <-gf.refreshCh:
-				// TODO: In Go 1.15, we can change it to ticker.Reset()
-				// This will also let us get rid of the trick in defer
-				ticker.Stop()
-				ticker = time.NewTicker(generationFetchPeriod)
 			}
 		}
 	}
@@ -182,7 +173,7 @@ outer:
 	return nil
 }
 
-func (gf *generationFetcher) get(ctx context.Context) (*generation, error) {
+func (gf *generationFetcher) Get(ctx context.Context) (*generation, error) {
 	select {
 	case <-gf.stopCh:
 		return nil, nil
@@ -193,14 +184,52 @@ func (gf *generationFetcher) get(ctx context.Context) (*generation, error) {
 	}
 }
 
-func (gf *generationFetcher) stop() {
+func (gf *generationFetcher) Stop() {
 	close(gf.stopCh)
 }
 
-func (gf *generationFetcher) triggerRefresh() {
+func (gf *generationFetcher) TriggerRefresh() {
 	select {
 	case gf.refreshCh <- struct{}{}:
 	default:
+	}
+}
+
+func (gf *generationFetcher) fetchFromGenerationsTable(
+	query *gocql.Query,
+	timePoint time.Time,
+) ([]*generation, error) {
+	iter := query.Consistency(gf.consistency).Bind(timePoint).Iter()
+
+	var gl generationList
+	for {
+		gen := &generation{}
+		if !iter.Scan(&gen.startTime, &gen.streams) {
+			break
+		}
+		gl = append(gl, gen)
+	}
+	if err := iter.Close(); err != nil {
+		gf.logger.Printf("an error occured while fetching generations: %s", err)
+		return nil, err
+	}
+
+	if len(gl) > 0 {
+		gf.logger.Printf("poll returned %d generations", len(gl))
+	}
+
+	sort.Sort(gl)
+	return gl, nil
+}
+
+func (gf *generationFetcher) pushGeneration(gen *generation) (shouldStop bool) {
+	gf.logger.Printf("pushing generation %v", gen.startTime)
+	select {
+	case <-gf.stopCh:
+		return true
+	case gf.generationCh <- gen:
+		gf.lastTime = gen.startTime
+		return false
 	}
 }
 
