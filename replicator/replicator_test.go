@@ -259,7 +259,6 @@ func TestReplicator(t *testing.T) {
 		ConfidenceWindowSize:   0,
 	}
 
-	// TODO: Make it possible for the replicator to replicate multiple tables simultaneously
 	schemaNames := make([]string, 0)
 	for tbl := range schemas {
 		schemaNames = append(schemaNames, tbl)
