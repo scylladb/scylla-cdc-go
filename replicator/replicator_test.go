@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +84,8 @@ var testCases = []struct {
 			"INSERT INTO %s (pk, ck, v1, v2) VALUES ('partitionDeletes', 1, 2, 'abc')",
 			"INSERT INTO %s (pk, ck, v1, v2) VALUES ('partitionDeletes', 2, 3, 'def')",
 			"DELETE FROM %s WHERE pk = 'partitionDeletes'",
+			// Insert one more row, just to check if replication works at all
+			"INSERT INTO %s (pk, ck, v1, v2) VALUES ('partitionDeletes', 4, 5, 'def')",
 		},
 	},
 	{
@@ -251,22 +252,22 @@ func TestReplicator(t *testing.T) {
 
 	adv := scylla_cdc.AdvancedReaderConfig{
 		ChangeAgeLimit:         time.Minute,
-		PostNonEmptyQueryDelay: 500 * time.Millisecond,
-		PostEmptyQueryDelay:    500 * time.Millisecond,
-		PostFailedQueryDelay:   500 * time.Millisecond,
+		PostNonEmptyQueryDelay: 10 * time.Second,
+		PostEmptyQueryDelay:    10 * time.Second,
+		PostFailedQueryDelay:   10 * time.Second,
 		QueryTimeWindowSize:    5 * time.Minute,
 		ConfidenceWindowSize:   0,
 	}
 
 	// TODO: Make it possible for the replicator to replicate multiple tables simultaneously
-	enders := make([]func() error, 0, 0)
+	schemaNames := make([]string, 0)
 	for tbl := range schemas {
-		tbl = strings.Split(tbl, ".")[1]
-		finishF, err := RunReplicator(context.Background(), "ks", tbl, sourceAddress, destinationAddress, &adv)
-		if err != nil {
-			t.Fatal(err)
-		}
-		enders = append(enders, finishF)
+		schemaNames = append(schemaNames, tbl)
+	}
+
+	finishF, err := RunReplicator(context.Background(), sourceAddress, destinationAddress, schemaNames, &adv)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	// Wait 10 seconds
@@ -274,16 +275,15 @@ func TestReplicator(t *testing.T) {
 
 	t.Log("validating results")
 
-	for _, finishF := range enders {
-		err := finishF()
-		if err != nil {
-			t.Fatal(err)
-		}
+	if err := finishF(); err != nil {
+		t.Fatal(err)
 	}
 
 	// Compare
 	sourceSet := fetchFullSet(t, sourceSession, schemas)
 	destinationSet := fetchFullSet(t, destinationSession, schemas)
+
+	failedCount := 0
 
 	for _, tc := range testCases {
 		sourceData := sourceSet[tc.pk]
@@ -305,17 +305,30 @@ func TestReplicator(t *testing.T) {
 				t.Logf("    %v", row)
 			}
 			t.Fail()
+			failedCount++
 			continue
 		}
 
+		failed := false
 		for i := 0; i < len(sourceData); i++ {
 			if !reflect.DeepEqual(sourceData[i], destinationData[i]) {
 				t.Logf("%s: mismatch", tc.pk)
 				t.Logf("  source: %v", sourceData[i])
 				t.Logf("  dest:   %v", destinationData[i])
-				t.Fail()
+				failed = true
 			}
 		}
+
+		if failed {
+			t.Fail()
+			failedCount++
+		} else {
+			t.Logf("%s: OK", tc.pk)
+		}
+	}
+
+	if failedCount > 0 {
+		t.Logf("failed %d/%d test cases", failedCount, len(testCases))
 	}
 }
 

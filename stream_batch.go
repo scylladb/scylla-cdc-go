@@ -87,8 +87,6 @@ outer:
 				return sbr.lastTimestamp, err
 			}
 
-			sbr.config.Logger.Printf("querying: %v vs %v", sbr.lastTimestamp.Time(), pollEnd.Time())
-
 			var change Change
 			for {
 				streamCols, c := iter.Next()
@@ -107,7 +105,7 @@ outer:
 				if c.cdcCols.endOfBatch {
 					change.StreamID = streamCols.streamID
 					change.Time = streamCols.time
-					sbr.config.ChangeConsumer.Consume(change)
+					sbr.config.ChangeConsumer.Consume(sbr.tableName, change)
 
 					change.Preimage = nil
 					change.Delta = nil

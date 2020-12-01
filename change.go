@@ -150,7 +150,7 @@ func (c *ChangeRow) String() string {
 
 	// Print columns in order
 	for _, k := range ks {
-		v := c.data[k]
+		v, present := c.data[k]
 		if !first {
 			b.WriteString(" ")
 		}
@@ -160,12 +160,10 @@ func (c *ChangeRow) String() string {
 		if strings.HasPrefix(k, "cdc$deleted_") {
 			b.WriteString(fmt.Sprintf("%v", v))
 		} else {
-			// Should be a pointer
-			v := reflect.ValueOf(v)
-			if v.IsNil() {
-				b.WriteString("nil")
+			if present {
+				b.WriteString(fmt.Sprintf("%v", v))
 			} else {
-				b.WriteString(fmt.Sprintf("%v", reflect.Indirect(v).Interface()))
+				b.WriteString("nil")
 			}
 		}
 	}
@@ -174,13 +172,13 @@ func (c *ChangeRow) String() string {
 }
 
 type ChangeConsumer interface {
-	Consume(Change)
+	Consume(tableName string, change Change)
 }
 
-type ChangeConsumerFunc func(Change)
+type ChangeConsumerFunc func(tableName string, change Change)
 
-func (ccf ChangeConsumerFunc) Consume(c Change) {
-	ccf(c)
+func (ccf ChangeConsumerFunc) Consume(tableName string, change Change) {
+	ccf(tableName, change)
 }
 
 // An adapter over gocql.Iterator

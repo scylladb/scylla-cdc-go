@@ -33,7 +33,12 @@ func main() {
 	flag.StringVar(&destination, "destination", "", "address of a node in destination cluster")
 	flag.Parse()
 
-	finishFunc, err := RunReplicator(context.Background(), keyspace, table, source, destination, nil)
+	finishFunc, err := RunReplicator(
+		context.Background(),
+		source, destination,
+		[]string{keyspace + "." + table},
+		nil,
+	)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -62,7 +67,8 @@ func main() {
 
 func RunReplicator(
 	ctx context.Context,
-	keyspace, table, source, destination string,
+	source, destination string,
+	tableNames []string,
 	advancedParams *scylla_cdc.AdvancedReaderConfig,
 ) (func() error, error) {
 	// Configure a session for the destination cluster
@@ -72,21 +78,34 @@ func RunReplicator(
 		return nil, err
 	}
 
-	kmeta, err := destinationSession.KeyspaceMetadata(keyspace)
-	if err != nil {
-		destinationSession.Close()
-		return nil, err
+	tableReplicators := make(map[string]scylla_cdc.ChangeConsumer)
+	logTableNames := make([]string, 0)
+
+	for _, tableName := range tableNames {
+		splitTableName := strings.SplitN(tableName, ".", 2)
+		if len(splitTableName) < 2 {
+			return nil, fmt.Errorf("table name is not fully qualified: %s", tableName)
+		}
+
+		kmeta, err := destinationSession.KeyspaceMetadata(splitTableName[0])
+		if err != nil {
+			destinationSession.Close()
+			return nil, err
+		}
+		tmeta, ok := kmeta.Tables[splitTableName[1]]
+		if !ok {
+			destinationSession.Close()
+			return nil, fmt.Errorf("table %s does not exist", tableName)
+		}
+		tableReplicators[tableName+"_scylla_cdc_log"] = NewDeltaReplicator(destinationSession, tmeta)
+		logTableNames = append(logTableNames, tableName+"_scylla_cdc_log")
 	}
-	tmeta, ok := kmeta.Tables[table]
-	if !ok {
-		destinationSession.Close()
-		return nil, fmt.Errorf("table %s does not exist", table)
-	}
-	replicator := NewDeltaReplicator(destinationSession, tmeta)
+
+	replicator := &TableRoutingConsumer{tableReplicators}
 
 	tracker := scylla_cdc.NewClusterStateTracker(gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy()))
 
-	// Configure a session first
+	// Configure a session
 	cluster := gocql.NewCluster(source)
 	cluster.PoolConfig.HostSelectionPolicy = tracker
 	session, err := cluster.CreateSession()
@@ -98,8 +117,8 @@ func RunReplicator(
 	// Configuration for the CDC reader
 	cfg := scylla_cdc.NewReaderConfig(
 		session,
-		keyspace+"."+table+"_scylla_cdc_log",
 		replicator,
+		logTableNames...,
 	)
 	if advancedParams != nil {
 		cfg.Advanced = *advancedParams
@@ -126,6 +145,18 @@ func RunReplicator(
 		destinationSession.Close()
 		return err
 	}, nil
+}
+
+// TODO: We could actually put this one in the lib
+type TableRoutingConsumer struct {
+	tableConsumers map[string]scylla_cdc.ChangeConsumer
+}
+
+func (trc *TableRoutingConsumer) Consume(tableName string, change scylla_cdc.Change) {
+	consumer, present := trc.tableConsumers[tableName]
+	if present {
+		consumer.Consume(tableName, change)
+	}
 }
 
 type DeltaReplicator struct {
@@ -314,7 +345,7 @@ func (r *DeltaReplicator) computeRangeDeleteQueries() {
 	}
 }
 
-func (r *DeltaReplicator) Consume(c scylla_cdc.Change) {
+func (r *DeltaReplicator) Consume(tableName string, c scylla_cdc.Change) {
 	timestamp := c.GetCassandraTimestamp()
 	pos := 0
 

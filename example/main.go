@@ -32,7 +32,7 @@ func main() {
 	cfg := &scylla_cdc.ReaderConfig{
 		Session:             session,
 		Consistency:         gocql.One,
-		LogTableName:        "ks.tbl_scylla_cdc_log",
+		LogTableNames:       []string{"ks.tbl_scylla_cdc_log"},
 		ChangeConsumer:      scylla_cdc.ChangeConsumerFunc(simpleConsumer),
 		ClusterStateTracker: tracker,
 
@@ -61,6 +61,6 @@ func main() {
 	}
 }
 
-func simpleConsumer(change scylla_cdc.Change) {
-	fmt.Println(change)
+func simpleConsumer(tableName string, change scylla_cdc.Change) {
+	fmt.Println(tableName, change)
 }
