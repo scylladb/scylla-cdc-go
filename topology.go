@@ -101,7 +101,7 @@ func newGenerationFetcher(
 
 		consistency: consistency,
 
-		generationCh: make(chan *generation),
+		generationCh: make(chan *generation, 1),
 		stopCh:       make(chan struct{}),
 		refreshCh:    make(chan struct{}, 1),
 	}
@@ -118,15 +118,18 @@ func (gf *generationFetcher) Run(ctx context.Context) error {
 	// start reading
 	gl, err := gf.fetchFromGenerationsTable(queryGensUpToTime, gf.lastTime)
 	if err != nil {
+		close(gf.generationCh)
 		return err
 	}
 
 	if len(gl) > 0 {
 		first := gl[len(gl)-1]
 
-		if shouldStop := gf.pushGeneration(first); shouldStop {
-			return nil
-		}
+		gf.logger.Printf("pushing the first generation %v", first.startTime)
+		gf.generationCh <- first
+		gf.lastTime = first.startTime
+	} else {
+		gf.logger.Printf("the first generation hasn't started yet (%v)", gf.lastTime)
 	}
 
 	// Periodically poll for newer generations
@@ -140,14 +143,13 @@ outer:
 		// See if there are any new generations
 		gl, err := gf.fetchFromGenerationsTable(queryGensAfterTime, gf.lastTime)
 		if err != nil {
-			// TODO: Retry it later
-			return err
-		}
-
-		// Push generations that we fetched to generationCh
-		for _, g := range gl {
-			if shouldStop := gf.pushGeneration(g); shouldStop {
-				break
+			l.Printf("an error occurred while trying to fetch new generations: %v", err)
+		} else {
+			// Push generations that we fetched to generationCh
+			for _, g := range gl {
+				if shouldStop := gf.pushGeneration(g); shouldStop {
+					break
+				}
 			}
 		}
 
@@ -170,13 +172,12 @@ outer:
 	}
 
 	l.Printf("stopped generation fetcher")
+	close(gf.generationCh)
 	return nil
 }
 
 func (gf *generationFetcher) Get(ctx context.Context) (*generation, error) {
 	select {
-	case <-gf.stopCh:
-		return nil, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case gen := <-gf.generationCh:

@@ -246,15 +246,13 @@ func TestReplicator(t *testing.T) {
 		}
 	}
 
-	<-time.After(3 * time.Second)
-
 	t.Log("running replicators")
 
 	adv := scylla_cdc.AdvancedReaderConfig{
 		ChangeAgeLimit:         time.Minute,
-		PostNonEmptyQueryDelay: 10 * time.Second,
-		PostEmptyQueryDelay:    10 * time.Second,
-		PostFailedQueryDelay:   10 * time.Second,
+		PostNonEmptyQueryDelay: 3 * time.Second,
+		PostEmptyQueryDelay:    3 * time.Second,
+		PostFailedQueryDelay:   3 * time.Second,
 		QueryTimeWindowSize:    5 * time.Minute,
 		ConfidenceWindowSize:   0,
 	}
@@ -264,19 +262,22 @@ func TestReplicator(t *testing.T) {
 		schemaNames = append(schemaNames, tbl)
 	}
 
-	finishF, err := RunReplicator(context.Background(), sourceAddress, destinationAddress, schemaNames, &adv)
+	replicator, err := MakeReplicator(sourceAddress, destinationAddress, schemaNames, &adv)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Wait 10 seconds
-	<-time.After(10 * time.Second)
+	ctx := context.Background()
 
-	t.Log("validating results")
+	errC := make(chan error)
+	go func() { errC <- replicator.Run(ctx) }()
 
-	if err := finishF(); err != nil {
+	replicator.StopAt(time.Now().Add(time.Second))
+	if err := <-errC; err != nil {
 		t.Fatal(err)
 	}
+
+	t.Log("validating results")
 
 	// Compare
 	sourceSet := fetchFullSet(t, sourceSession, schemas)

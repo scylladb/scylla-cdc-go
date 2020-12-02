@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/gocql/gocql"
 	scylla_cdc "github.com/piodul/scylla-cdc-go"
@@ -33,8 +34,7 @@ func main() {
 	flag.StringVar(&destination, "destination", "", "address of a node in destination cluster")
 	flag.Parse()
 
-	finishFunc, err := RunReplicator(
-		context.Background(),
+	reader, err := MakeReplicator(
 		source, destination,
 		[]string{keyspace + "." + table},
 		nil,
@@ -43,34 +43,40 @@ func main() {
 		log.Fatalln(err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	// React to Ctrl+C signal, and stop gracefully after the first signal
-	// Second signal exits the process
-	// TODO: The stopping process here could be a little nicer
+	// Second signal cancels the context, so that the replicator
+	// should stop immediately, but still gracefully
+	// The third signal kills the process
 	signalC := make(chan os.Signal)
 	go func() {
 		<-signalC
-		go func() {
-			err := finishFunc()
-			if err != nil {
-				log.Fatalln(err)
-			}
-			os.Exit(0)
-		}()
+		now := time.Now()
+		log.Printf("stopping at %v", now)
+		reader.StopAt(now)
 
 		<-signalC
+		log.Printf("stopping now")
+		cancel()
+
+		<-signalC
+		log.Printf("killing")
 		os.Exit(1)
 	}()
 	signal.Notify(signalC, os.Interrupt)
 
-	select {}
+	if err := reader.Run(ctx); err != nil {
+		log.Println(err)
+		os.Exit(1)
+	}
 }
 
-func RunReplicator(
-	ctx context.Context,
+func MakeReplicator(
 	source, destination string,
 	tableNames []string,
 	advancedParams *scylla_cdc.AdvancedReaderConfig,
-) (func() error, error) {
+) (*scylla_cdc.Reader, error) {
 	// Configure a session for the destination cluster
 	destinationCluster := gocql.NewCluster(destination)
 	destinationSession, err := destinationCluster.CreateSession()
@@ -133,18 +139,8 @@ func RunReplicator(
 		return nil, err
 	}
 
-	errC := make(chan error)
-	go func() {
-		errC <- reader.Run(ctx)
-	}()
-
-	return func() error {
-		reader.Stop()
-		err := <-errC
-		session.Close()
-		destinationSession.Close()
-		return err
-	}, nil
+	// TODO: source and destination sessions are leaking
+	return reader, nil
 }
 
 // TODO: We could actually put this one in the lib

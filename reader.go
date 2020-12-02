@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -95,6 +96,7 @@ type Reader struct {
 	genFetcher *generationFetcher
 	readFrom   time.Time
 	stoppedCh  chan struct{}
+	stopTime   atomic.Value
 }
 
 // Creates a new CDC reader.
@@ -196,9 +198,16 @@ func (r *Reader) Run(ctx context.Context) error {
 				}
 				for _, reader := range readers {
 					if nextGen == nil {
-						reader.stopNow()
+						// The reader was stopped
+						stopAt, _ := r.stopTime.Load().(time.Time)
+						if stopAt.IsZero() {
+							reader.stopNow()
+						} else {
+							reader.close(gocql.MaxTimeUUID(stopAt))
+							r.readFrom = stopAt
+						}
 					} else {
-						reader.close(gocql.MaxTimeUUID(nextGen.startTime))
+						reader.close(gocql.MinTimeUUID(nextGen.startTime))
 						r.readFrom = nextGen.startTime
 					}
 				}
@@ -221,8 +230,22 @@ func (r *Reader) Run(ctx context.Context) error {
 	return runErrG.Wait()
 }
 
-// Stop gracefully stops the CDC reader. It does not wait until the reader shuts down.
+// Stop tells the reader to stop as soon as possible. There is no guarantee
+// related to how much data will be processed in each stream when the reader
+// stops. If you want to e.g. make sure that all cdc log data with timestamps
+// up to the current moment was processed, use (*Reader).StopAt(time.Now()).
+// This function does not wait until the reader stops.
 func (r *Reader) Stop() {
+	close(r.stoppedCh)
+}
+
+// StopAt tells the reader to stop reading changes after reaching given timestamp.
+// Does not guarantee that the reader won't read any changes after the timestamp,
+// but the reader will stop after all tables and streams are advanced to or past
+// the timestamp.
+// This function does not wait until the reader stops.
+func (r *Reader) StopAt(at time.Time) {
+	r.stopTime.Store(at)
 	close(r.stoppedCh)
 }
 

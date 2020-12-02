@@ -78,6 +78,8 @@ outer:
 			hadRows bool
 		)
 
+		readUpTo := pollEnd
+
 		if CompareTimeuuid(sbr.lastTimestamp, pollEnd) < 0 {
 			// Set the time interval from which we need to return data
 			bindArgs[len(bindArgs)-2] = sbr.lastTimestamp
@@ -124,9 +126,11 @@ outer:
 			if err = iter.Close(); err != nil {
 				return sbr.lastTimestamp, err
 			}
+		} else {
+			readUpTo = sbr.lastTimestamp
 		}
 
-		if sbr.reachedEndOfTheGeneration(sbr.lastTimestamp) {
+		if sbr.reachedEndOfTheGeneration(readUpTo) {
 			break outer
 		}
 
@@ -149,8 +153,8 @@ outer:
 			case <-time.After(delayUntil.Sub(time.Now())):
 				break delay
 			case <-sbr.interruptCh:
-				if sbr.reachedEndOfTheGeneration(sbr.lastTimestamp) {
-					break delay
+				if sbr.reachedEndOfTheGeneration(readUpTo) {
+					break outer
 				}
 			}
 		}
