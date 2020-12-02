@@ -18,7 +18,7 @@ import (
 // TODO: Escape field names?
 // TODO: Tuple support
 
-var debugQueries = true
+var debugQueries = false
 
 func main() {
 	var (
@@ -26,18 +26,32 @@ func main() {
 		table       string
 		source      string
 		destination string
+		consistency string
 	)
 
 	flag.StringVar(&keyspace, "keyspace", "", "keyspace name")
 	flag.StringVar(&table, "table", "", "table name")
 	flag.StringVar(&source, "source", "", "address of a node in source cluster")
 	flag.StringVar(&destination, "destination", "", "address of a node in destination cluster")
+	flag.StringVar(&consistency, "consistency", "", "consistency level (one, quorum, all)")
+	flag.String("mode", "", "mode (ignored)")
 	flag.Parse()
+
+	cl := gocql.One
+	switch strings.ToLower(consistency) {
+	case "one":
+		cl = gocql.One
+	case "quorum":
+		cl = gocql.Quorum
+	case "all":
+		cl = gocql.All
+	}
 
 	reader, err := MakeReplicator(
 		source, destination,
 		[]string{keyspace + "." + table},
 		nil,
+		cl,
 	)
 	if err != nil {
 		log.Fatalln(err)
@@ -70,12 +84,15 @@ func main() {
 		log.Println(err)
 		os.Exit(1)
 	}
+
+	log.Println("quitting")
 }
 
 func MakeReplicator(
 	source, destination string,
 	tableNames []string,
 	advancedParams *scylla_cdc.AdvancedReaderConfig,
+	consistency gocql.Consistency,
 ) (*scylla_cdc.Reader, error) {
 	// Configure a session for the destination cluster
 	destinationCluster := gocql.NewCluster(destination)
@@ -103,7 +120,7 @@ func MakeReplicator(
 			destinationSession.Close()
 			return nil, fmt.Errorf("table %s does not exist", tableName)
 		}
-		tableReplicators[tableName] = NewDeltaReplicator(destinationSession, tmeta)
+		tableReplicators[tableName] = NewDeltaReplicator(destinationSession, tmeta, consistency)
 		logTableNames = append(logTableNames, tableName)
 	}
 
@@ -129,6 +146,7 @@ func MakeReplicator(
 	if advancedParams != nil {
 		cfg.Advanced = *advancedParams
 	}
+	cfg.Consistency = consistency
 	cfg.ClusterStateTracker = tracker
 	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
@@ -179,7 +197,7 @@ type updateQuerySet struct {
 	remove string
 }
 
-func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata) *DeltaReplicator {
+func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata, consistency gocql.Consistency) *DeltaReplicator {
 	var (
 		pkColumns    []string
 		ckColumns    []string
@@ -207,7 +225,7 @@ func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata) *Delt
 	dr := &DeltaReplicator{
 		session:     session,
 		tableName:   meta.Keyspace + "." + meta.Name,
-		consistency: gocql.Quorum,
+		consistency: consistency,
 
 		pkColumns:        pkColumns,
 		ckColumns:        ckColumns,
@@ -378,7 +396,6 @@ func (r *DeltaReplicator) Consume(tableName string, c scylla_cdc.Change) {
 }
 
 func (r *DeltaReplicator) processUpdate(timestamp int64, c *scylla_cdc.ChangeRow) {
-
 	r.processInsertOrUpdate(timestamp, false, c)
 }
 

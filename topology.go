@@ -125,11 +125,9 @@ func (gf *generationFetcher) Run(ctx context.Context) error {
 	if len(gl) > 0 {
 		first := gl[len(gl)-1]
 
-		gf.logger.Printf("pushing the first generation %v", first.startTime)
+		gf.logger.Printf("pushing generation %v", first.startTime)
 		gf.generationCh <- first
 		gf.lastTime = first.startTime
-	} else {
-		gf.logger.Printf("the first generation hasn't started yet (%v)", gf.lastTime)
 	}
 
 	// Periodically poll for newer generations

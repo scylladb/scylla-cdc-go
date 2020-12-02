@@ -57,7 +57,7 @@ func main() {
 	signal.Notify(signalC, os.Interrupt)
 
 	if err := reader.Run(context.Background()); err != nil {
-		log.Fatal(err)
+		log.Fatalf("replicator failed: %s", err)
 	}
 }
 

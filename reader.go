@@ -178,10 +178,10 @@ func (r *Reader) Run(ctx context.Context) error {
 				}
 			}
 
+			sleepAmount := r.config.Advanced.PostNonEmptyQueryDelay / time.Duration(len(readers))
 			for i := range readers {
-				reader := readers[i]
-				// TODO: slightly sleep before creating each of them
-				// in order to make them more distributed in time
+				reader := readers[i] // TODO: Should this be interruptible?
+				<-time.After(sleepAmount)
 				genErrG.Go(func() error {
 					// TODO: Do something sensible with returned timeuuid
 					_, err := reader.run(genCtx)

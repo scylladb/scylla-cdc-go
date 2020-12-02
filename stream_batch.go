@@ -62,6 +62,7 @@ func (sbr *streamBatchReader) run(ctx context.Context) (gocql.UUID, error) {
 		bindArgs[i] = stream
 	}
 
+	// sbr.config.Logger.Printf("starting stream processor loop for %v", sbr.streams)
 outer:
 	for {
 		timeWindowEnd := sbr.lastTimestamp.Time().Add(sbr.config.Advanced.QueryTimeWindowSize)
@@ -74,8 +75,8 @@ outer:
 		pollEnd := gocql.MinTimeUUID(timeWindowEnd)
 
 		var (
-			err     error
-			hadRows bool
+			err      error
+			rowCount int
 		)
 
 		readUpTo := pollEnd
@@ -86,49 +87,51 @@ outer:
 			bindArgs[len(bindArgs)-1] = pollEnd
 			iter, err := newChangeRowIterator(q.Bind(bindArgs...).Iter())
 			if err != nil {
-				sbr.config.Logger.Printf("error while quering: %s", err)
-				return sbr.lastTimestamp, err
-			}
-
-			var change Change
-			for {
-				streamCols, c := iter.Next()
-				if c == nil {
-					break
-				}
-
-				if c.GetOperation() == PreImage {
-					change.Preimage = append(change.Preimage, c)
-				} else if c.GetOperation() == PostImage {
-					change.Postimage = append(change.Postimage, c)
-				} else {
-					change.Delta = append(change.Delta, c)
-				}
-
-				if c.cdcCols.endOfBatch {
-					change.StreamID = streamCols.streamID
-					change.Time = streamCols.time
-					sbr.config.ChangeConsumer.Consume(sbr.baseTableName, change)
-
-					change.Preimage = nil
-					change.Delta = nil
-					change.Postimage = nil
-
-					// Update the last timestamp only after we processed whole batch
-					if CompareTimeuuid(sbr.lastTimestamp, streamCols.time) < 0 {
-						sbr.lastTimestamp = streamCols.time
+				sbr.config.Logger.Printf("error while quering (will retry): %s", err)
+			} else {
+				var change Change
+				for {
+					streamCols, c := iter.Next()
+					if c == nil {
+						break
 					}
+
+					if c.GetOperation() == PreImage {
+						change.Preimage = append(change.Preimage, c)
+					} else if c.GetOperation() == PostImage {
+						change.Postimage = append(change.Postimage, c)
+					} else {
+						change.Delta = append(change.Delta, c)
+					}
+
+					if c.cdcCols.endOfBatch {
+						change.StreamID = streamCols.streamID
+						change.Time = streamCols.time
+						sbr.config.ChangeConsumer.Consume(sbr.baseTableName, change)
+
+						change.Preimage = nil
+						change.Delta = nil
+						change.Postimage = nil
+
+						// Update the last timestamp only after we processed whole batch
+						if CompareTimeuuid(sbr.lastTimestamp, streamCols.time) < 0 {
+							sbr.lastTimestamp = streamCols.time
+						}
+					}
+
+					rowCount++
 				}
 
-				hadRows = true
-			}
-
-			if err = iter.Close(); err != nil {
-				return sbr.lastTimestamp, err
+				if err = iter.Close(); err != nil {
+					sbr.config.Logger.Printf("error while querying (will retry): %s", err)
+				}
 			}
 		} else {
+			// sbr.config.Logger.Printf("not polling")
 			readUpTo = sbr.lastTimestamp
 		}
+
+		sbr.lastTimestamp = readUpTo
 
 		if sbr.reachedEndOfTheGeneration(readUpTo) {
 			break outer
@@ -137,7 +140,7 @@ outer:
 		var delay time.Duration
 		if err != nil {
 			delay = sbr.config.Advanced.PostFailedQueryDelay
-		} else if hadRows {
+		} else if rowCount > 0 {
 			delay = sbr.config.Advanced.PostNonEmptyQueryDelay
 		} else {
 			delay = sbr.config.Advanced.PostEmptyQueryDelay
@@ -160,6 +163,7 @@ outer:
 		}
 
 	}
+	// sbr.config.Logger.Printf("successfully finishing stream processor loop for %v", sbr.streams)
 	return sbr.lastTimestamp, nil
 }
 
