@@ -312,7 +312,7 @@ func (r *DeltaReplicator) computeInsertQuery() {
 
 	valueMarkers := []string{}
 	for _, colName := range r.otherColumns {
-		valueMarkers = append(valueMarkers, r.makeBindMarkerForColumn(colName))
+		valueMarkers = append(valueMarkers, makeBindMarkerForType(r.columnTypes[colName]))
 	}
 	for i := 0; i < len(r.pkColumns)+len(r.ckColumns); i++ {
 		valueMarkers = append(valueMarkers, "?")
@@ -438,7 +438,6 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 		isDeleted := c.IsDeleted(colName)
 
 		if !isNonFrozenCollection {
-			// TODO: Do tuples use "removed elements" list?
 			if typ.Type() == TypeTuple {
 				tupleTyp := typ.Unfrozen().(*TupleType)
 				for i := range tupleTyp.Elements {
@@ -765,7 +764,7 @@ func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla
 func (r *DeltaReplicator) makeBindMarkerAssignmentList(columnNames []string) []string {
 	assignments := make([]string, 0, len(columnNames))
 	for _, name := range columnNames {
-		assignments = append(assignments, name+" = "+r.makeBindMarkerForColumn(name))
+		assignments = append(assignments, name+" = "+makeBindMarkerForType(r.columnTypes[name]))
 	}
 	return assignments
 }
@@ -775,13 +774,16 @@ func (r *DeltaReplicator) makeBindMarkerAssignments(columnNames []string, sep st
 	return strings.Join(assignments, sep)
 }
 
-func (r *DeltaReplicator) makeBindMarkerForColumn(columnName string) string {
-	typ := r.columnTypes[columnName]
+func makeBindMarkerForType(typ TypeInfo) string {
 	if typ.Type() != TypeTuple {
 		return "?"
 	}
 	tupleTyp := typ.Unfrozen().(*TupleType)
-	return "(?" + strings.Repeat(", ?", len(tupleTyp.Elements)-1) + ")"
+	vals := make([]string, 0, len(tupleTyp.Elements))
+	for _, typ := range tupleTyp.Elements {
+		vals = append(vals, makeBindMarkerForType(typ))
+	}
+	return "(" + strings.Join(vals, ", ") + ")"
 }
 
 func appendKeyValuesToBind(

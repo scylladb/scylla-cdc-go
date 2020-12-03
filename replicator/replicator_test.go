@@ -48,6 +48,10 @@ var (
 		"ks.tbl_tuples",
 		"CREATE TABLE ks.tbl_tuples (pk text, ck int, v tuple<text, int>, PRIMARY KEY (pk, ck))",
 	}
+	schemaTuplesInTuples = schema{
+		"ks.tbl_tuples_in_tuples",
+		"CREATE TABLE ks.tbl_tuples_in_tuples (pk text, ck int, v tuple<tuple<int, text>, int>, PRIMARY KEY (pk, ck))",
+	}
 )
 
 var testCases = []struct {
@@ -228,7 +232,6 @@ var testCases = []struct {
 	},
 
 	// TODO: UDTs
-	// TODO: Tuples
 
 	{
 		schemaTuples,
@@ -245,8 +248,22 @@ var testCases = []struct {
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 1, ('abc', 7))",
 			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 2, ('def', 9))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 3, ('ghi', 11))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 4, ('jkl', 13))",
 			"UPDATE %s SET v = ('zyx', 111) WHERE pk = 'tupleUpdates' AND ck = 1",
 			"UPDATE %s SET v = null WHERE pk = 'tupleUpdates' AND ck = 2",
+			"INSERT INTO %s (pk, ck) VALUES ('tupleUpdates', 3)",
+			// "UPDATE %s SET v = (null, null) WHERE pk = 'tupleUpdates' AND ck = 4", <-- Unsupported, unfortunately
+		},
+	},
+	{
+		schemaTuplesInTuples,
+		"tuplesInTuples",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 1, ((1, 'abc'), 7))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 2, ((3, 'def'), 9))",
+			"UPDATE %s SET v = ((100, 'zyx'), 111) WHERE pk = 'tuplesInTuples' AND ck = 1",
+			"UPDATE %s SET v = null WHERE pk = 'tuplesInTuples' AND ck = 2",
 		},
 	},
 }
