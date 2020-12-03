@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
+	"regexp"
 	"testing"
 	"time"
 
@@ -41,6 +43,10 @@ var (
 	schemaMaps = schema{
 		"ks.tbl_maps",
 		"CREATE TABLE ks.tbl_maps (pk text, ck int, v map<int, int>, PRIMARY KEY (pk, ck))",
+	}
+	schemaTuples = schema{
+		"ks.tbl_tuples",
+		"CREATE TABLE ks.tbl_tuples (pk text, ck int, v tuple<text, int>, PRIMARY KEY (pk, ck))",
 	}
 )
 
@@ -223,9 +229,25 @@ var testCases = []struct {
 
 	// TODO: UDTs
 	// TODO: Tuples
+
+	{
+		schemaTuples,
+		"tupleInserts",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 1, ('abc', 7))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 2, ('def', 9))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 2, null)",
+		},
+	},
 }
 
 func TestReplicator(t *testing.T) {
+	filter := os.Getenv("REPLICATOR_TEST_FILTER")
+	if filter == "" {
+		filter = ".*"
+	}
+	re := regexp.MustCompile(filter)
+
 	// Collect all schemas
 	schemas := make(map[string]string)
 	for _, tc := range testCases {
@@ -241,6 +263,9 @@ func TestReplicator(t *testing.T) {
 
 	// Execute all of the queries
 	for _, tc := range testCases {
+		if !re.MatchString(tc.pk) {
+			continue
+		}
 		for _, qStr := range tc.queries {
 			execQuery(t, sourceSession, fmt.Sprintf(qStr, tc.schema.tableName))
 		}

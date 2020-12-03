@@ -18,7 +18,7 @@ import (
 // TODO: Escape field names?
 // TODO: Tuple support
 
-var debugQueries = false
+var debugQueries = true
 
 func main() {
 	var (
@@ -47,10 +47,19 @@ func main() {
 		cl = gocql.All
 	}
 
+	adv := scylla_cdc.AdvancedReaderConfig{
+		ConfidenceWindowSize:   0,
+		ChangeAgeLimit:         24 * time.Hour,
+		QueryTimeWindowSize:    24 * time.Hour,
+		PostEmptyQueryDelay:    15 * time.Second,
+		PostNonEmptyQueryDelay: 5 * time.Second,
+		PostFailedQueryDelay:   5 * time.Second,
+	}
+
 	reader, err := MakeReplicator(
 		source, destination,
 		[]string{keyspace + "." + table},
-		nil,
+		&adv,
 		cl,
 	)
 	if err != nil {
@@ -300,7 +309,21 @@ func (r *DeltaReplicator) computeUpdateQueries() {
 
 func (r *DeltaReplicator) computeInsertQuery() {
 	namesTuple := "(" + strings.Join(r.allColumns, ", ") + ")"
-	valueMarkersTuple := "(?" + strings.Repeat(", ?", len(r.allColumns)-1) + ")"
+
+	valueMarkers := []string{}
+	for _, typ := range r.otherColumnTypes {
+		if typ.Type() == TypeTuple {
+			tupleTyp := typ.Unfrozen().(*TupleType)
+			tupleMarkers := "(?" + strings.Repeat(", ?", len(tupleTyp.Elements)-1) + ")"
+			valueMarkers = append(valueMarkers, tupleMarkers)
+		} else {
+			valueMarkers = append(valueMarkers, "?")
+		}
+	}
+	for i := 0; i < len(r.pkColumns)+len(r.ckColumns); i++ {
+		valueMarkers = append(valueMarkers, "?")
+	}
+	valueMarkersTuple := "(" + strings.Join(valueMarkers, ", ") + ")"
 
 	r.insertQueryStr = fmt.Sprintf(
 		"INSERT INTO %s %s VALUES %s USING TTL ?",
@@ -421,13 +444,28 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 		isDeleted := c.IsDeleted(colName)
 
 		if !isNonFrozenCollection {
-			if isDeleted {
-				overwriteVals = append(overwriteVals, nil)
+			// TODO: Do tuples use "removed elements" list?
+			if typ.Type() == TypeTuple {
+				tupleTyp := typ.Unfrozen().(*TupleType)
+				for i := range tupleTyp.Elements {
+					v, hasV := c.GetValue(gocql.TupleColumnName(colName, i))
+					if hasV {
+						overwriteVals = append(overwriteVals, v)
+					} else if isDeleted {
+						overwriteVals = append(overwriteVals, nil)
+					} else {
+						overwriteVals = append(overwriteVals, gocql.UnsetValue)
+					}
+				}
 			} else {
-				if hasV {
-					overwriteVals = append(overwriteVals, v)
+				if isDeleted {
+					overwriteVals = append(overwriteVals, nil)
 				} else {
-					overwriteVals = append(overwriteVals, gocql.UnsetValue)
+					if hasV {
+						overwriteVals = append(overwriteVals, v)
+					} else {
+						overwriteVals = append(overwriteVals, gocql.UnsetValue)
+					}
 				}
 			}
 		} else {

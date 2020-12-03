@@ -50,6 +50,7 @@ func (t Type) IsCollection() bool {
 type TypeInfo interface {
 	Type() Type
 	IsFrozen() bool
+	Unfrozen() TypeInfo
 }
 
 type FrozenType struct {
@@ -62,6 +63,10 @@ func (ft *FrozenType) Type() Type {
 
 func (ft *FrozenType) IsFrozen() bool {
 	return true
+}
+
+func (ft *FrozenType) Unfrozen() TypeInfo {
+	return ft.Inner
 }
 
 type MapType struct {
@@ -77,6 +82,10 @@ func (mt *MapType) IsFrozen() bool {
 	return false
 }
 
+func (mt *MapType) Unfrozen() TypeInfo {
+	return mt
+}
+
 type ListType struct {
 	Element TypeInfo
 }
@@ -87,6 +96,10 @@ func (lt *ListType) Type() Type {
 
 func (lt *ListType) IsFrozen() bool {
 	return false
+}
+
+func (lt *ListType) Unfrozen() TypeInfo {
+	return lt
 }
 
 type SetType struct {
@@ -101,6 +114,10 @@ func (st *SetType) IsFrozen() bool {
 	return false
 }
 
+func (st *SetType) Unfrozen() TypeInfo {
+	return st
+}
+
 type TupleType struct {
 	Elements []TypeInfo
 }
@@ -113,6 +130,10 @@ func (tt *TupleType) IsFrozen() bool {
 	return false
 }
 
+func (tt *TupleType) Unfrozen() TypeInfo {
+	return tt
+}
+
 type NativeType struct {
 	RealType Type
 }
@@ -123,6 +144,10 @@ func (nt *NativeType) Type() Type {
 
 func (nt *NativeType) IsFrozen() bool {
 	return false
+}
+
+func (nt *NativeType) Unfrozen() TypeInfo {
+	return nt
 }
 
 func parseType(str string) TypeInfo {
