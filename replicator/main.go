@@ -187,11 +187,11 @@ type DeltaReplicator struct {
 	tableName   string
 	consistency gocql.Consistency
 
-	pkColumns        []string
-	ckColumns        []string
-	otherColumns     []string
-	otherColumnTypes []TypeInfo
-	allColumns       []string
+	pkColumns    []string
+	ckColumns    []string
+	otherColumns []string
+	columnTypes  map[string]TypeInfo
+	allColumns   []string
 
 	insertQueryStr          string
 	updateQueryStr          string
@@ -225,10 +225,10 @@ func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata, consi
 		}
 	}
 
-	otherColumnTypes := make([]TypeInfo, 0, len(otherColumns))
-	for _, colName := range otherColumns {
-		info := parseType(meta.Columns[colName].Type)
-		otherColumnTypes = append(otherColumnTypes, info)
+	columnTypes := make(map[string]TypeInfo, len(meta.Columns))
+	for colName, colMeta := range meta.Columns {
+		info := parseType(colMeta.Type)
+		columnTypes[colName] = info
 	}
 
 	dr := &DeltaReplicator{
@@ -236,11 +236,11 @@ func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata, consi
 		tableName:   meta.Keyspace + "." + meta.Name,
 		consistency: consistency,
 
-		pkColumns:        pkColumns,
-		ckColumns:        ckColumns,
-		otherColumns:     otherColumns,
-		otherColumnTypes: otherColumnTypes,
-		allColumns:       append(append(append([]string{}, otherColumns...), pkColumns...), ckColumns...),
+		pkColumns:    pkColumns,
+		ckColumns:    ckColumns,
+		otherColumns: otherColumns,
+		columnTypes:  columnTypes,
+		allColumns:   append(append(append([]string{}, otherColumns...), pkColumns...), ckColumns...),
 	}
 
 	dr.computeInsertQuery()
@@ -254,10 +254,10 @@ func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata, consi
 
 func (r *DeltaReplicator) computeUpdateQueries() {
 	// Compute the regular update query
-	assignments := makeBindMarkerAssignments(r.otherColumns, ", ")
+	assignments := r.makeBindMarkerAssignments(r.otherColumns, ", ")
 
 	keyColumns := append(append([]string{}, r.pkColumns...), r.ckColumns...)
-	conditions := makeBindMarkerAssignments(keyColumns, " AND ")
+	conditions := r.makeBindMarkerAssignments(keyColumns, " AND ")
 
 	r.updateQueryStr = fmt.Sprintf(
 		"UPDATE %s USING TTL ? SET %s WHERE %s",
@@ -269,7 +269,7 @@ func (r *DeltaReplicator) computeUpdateQueries() {
 	// Compute per-column update queries (only for non-frozen collections)
 	queries := make([]updateQuerySet, len(r.otherColumns))
 	for i, colName := range r.otherColumns {
-		typ := r.otherColumnTypes[i]
+		typ := r.columnTypes[colName]
 		if typ.IsFrozen() {
 			continue
 		}
@@ -311,14 +311,8 @@ func (r *DeltaReplicator) computeInsertQuery() {
 	namesTuple := "(" + strings.Join(r.allColumns, ", ") + ")"
 
 	valueMarkers := []string{}
-	for _, typ := range r.otherColumnTypes {
-		if typ.Type() == TypeTuple {
-			tupleTyp := typ.Unfrozen().(*TupleType)
-			tupleMarkers := "(?" + strings.Repeat(", ?", len(tupleTyp.Elements)-1) + ")"
-			valueMarkers = append(valueMarkers, tupleMarkers)
-		} else {
-			valueMarkers = append(valueMarkers, "?")
-		}
+	for _, colName := range r.otherColumns {
+		valueMarkers = append(valueMarkers, r.makeBindMarkerForColumn(colName))
 	}
 	for i := 0; i < len(r.pkColumns)+len(r.ckColumns); i++ {
 		valueMarkers = append(valueMarkers, "?")
@@ -339,7 +333,7 @@ func (r *DeltaReplicator) computeRowDeleteQuery() {
 	r.rowDeleteQueryStr = fmt.Sprintf(
 		"DELETE FROM %s WHERE %s",
 		r.tableName,
-		makeBindMarkerAssignments(keyColumns, " AND "),
+		r.makeBindMarkerAssignments(keyColumns, " AND "),
 	)
 }
 
@@ -347,7 +341,7 @@ func (r *DeltaReplicator) computePartitionDeleteQuery() {
 	r.partitionDeleteQueryStr = fmt.Sprintf(
 		"DELETE FROM %s WHERE %s",
 		r.tableName,
-		makeBindMarkerAssignments(r.pkColumns, " AND "),
+		r.makeBindMarkerAssignments(r.pkColumns, " AND "),
 	)
 }
 
@@ -355,7 +349,7 @@ func (r *DeltaReplicator) computeRangeDeleteQueries() {
 	r.rangeDeleteQueryStrs = make([]string, 0, 8*len(r.ckColumns))
 
 	prefix := fmt.Sprintf("DELETE FROM %s WHERE ", r.tableName)
-	eqConds := makeBindMarkerAssignmentList(r.pkColumns)
+	eqConds := r.makeBindMarkerAssignmentList(r.pkColumns)
 
 	for _, ckCol := range r.ckColumns {
 		for typ := 0; typ < 8; typ++ {
@@ -437,7 +431,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 	batch := gocql.NewBatch(gocql.UnloggedBatch)
 
 	for i, colName := range r.otherColumns {
-		typ := r.otherColumnTypes[i]
+		typ := r.columnTypes[colName]
 		isNonFrozenCollection := !typ.IsFrozen() && typ.Type().IsCollection()
 
 		v, hasV := c.GetValue(colName)
@@ -768,17 +762,26 @@ func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla
 	}
 }
 
-func makeBindMarkerAssignmentList(columnNames []string) []string {
+func (r *DeltaReplicator) makeBindMarkerAssignmentList(columnNames []string) []string {
 	assignments := make([]string, 0, len(columnNames))
 	for _, name := range columnNames {
-		assignments = append(assignments, name+" = ?")
+		assignments = append(assignments, name+" = "+r.makeBindMarkerForColumn(name))
 	}
 	return assignments
 }
 
-func makeBindMarkerAssignments(columnNames []string, sep string) string {
-	assignments := makeBindMarkerAssignmentList(columnNames)
+func (r *DeltaReplicator) makeBindMarkerAssignments(columnNames []string, sep string) string {
+	assignments := r.makeBindMarkerAssignmentList(columnNames)
 	return strings.Join(assignments, sep)
+}
+
+func (r *DeltaReplicator) makeBindMarkerForColumn(columnName string) string {
+	typ := r.columnTypes[columnName]
+	if typ.Type() != TypeTuple {
+		return "?"
+	}
+	tupleTyp := typ.Unfrozen().(*TupleType)
+	return "(?" + strings.Repeat(", ?", len(tupleTyp.Elements)-1) + ")"
 }
 
 func appendKeyValuesToBind(

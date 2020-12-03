@@ -239,6 +239,16 @@ var testCases = []struct {
 			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 2, null)",
 		},
 	},
+	{
+		schemaTuples,
+		"tupleUpdates",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 1, ('abc', 7))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 2, ('def', 9))",
+			"UPDATE %s SET v = ('zyx', 111) WHERE pk = 'tupleUpdates' AND ck = 1",
+			"UPDATE %s SET v = null WHERE pk = 'tupleUpdates' AND ck = 2",
+		},
+	},
 }
 
 func TestReplicator(t *testing.T) {
