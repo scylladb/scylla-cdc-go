@@ -40,7 +40,7 @@ func main() {
 
 	cfg := scylla_cdc.NewReaderConfig(
 		session,
-		scylla_cdc.ChangeConsumerFunc(printerConsumer),
+		scylla_cdc.MakeChangeConsumerFactoryFromFunc(printerConsumer),
 		keyspace+"."+table,
 	)
 	cfg.ClusterStateTracker = tracker
@@ -68,7 +68,7 @@ func main() {
 	}
 }
 
-func printerConsumer(tableName string, c scylla_cdc.Change) {
+func printerConsumer(tableName string, c scylla_cdc.Change) error {
 	fmt.Printf("[%s %s]:\n", hex.EncodeToString(c.StreamID), c.Time.String())
 	if len(c.Preimage) > 0 {
 		fmt.Println("  PREIMAGE:")
@@ -89,4 +89,6 @@ func printerConsumer(tableName string, c scylla_cdc.Change) {
 		}
 	}
 	fmt.Println()
+
+	return nil
 }

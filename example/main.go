@@ -30,11 +30,11 @@ func main() {
 
 	// Configuration for the CDC reader
 	cfg := &scylla_cdc.ReaderConfig{
-		Session:             session,
-		Consistency:         gocql.One,
-		TableNames:          []string{"ks.tbl"},
-		ChangeConsumer:      scylla_cdc.ChangeConsumerFunc(simpleConsumer),
-		ClusterStateTracker: tracker,
+		Session:               session,
+		Consistency:           gocql.One,
+		TableNames:            []string{"ks.tbl"},
+		ChangeConsumerFactory: scylla_cdc.MakeChangeConsumerFactoryFromFunc(simpleConsumer),
+		ClusterStateTracker:   tracker,
 
 		Logger: log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
 	}
@@ -61,6 +61,7 @@ func main() {
 	}
 }
 
-func simpleConsumer(tableName string, change scylla_cdc.Change) {
+func simpleConsumer(tableName string, change scylla_cdc.Change) error {
 	fmt.Println(tableName, change)
+	return nil
 }

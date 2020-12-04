@@ -171,15 +171,46 @@ func (c *ChangeRow) String() string {
 	return b.String()
 }
 
+type CreateChangeConsumerInput struct {
+	TableName string
+	streamIDs []StreamID
+}
+
+type ChangeConsumerFactory interface {
+	CreateChangeConsumer(input CreateChangeConsumerInput) (ChangeConsumer, error)
+}
+
 type ChangeConsumer interface {
-	Consume(tableName string, change Change)
+	End()
+	Consume(change Change) error
 }
 
-type ChangeConsumerFunc func(tableName string, change Change)
-
-func (ccf ChangeConsumerFunc) Consume(tableName string, change Change) {
-	ccf(tableName, change)
+func MakeChangeConsumerFactoryFromFunc(f ChangeConsumerFunc) ChangeConsumerFactory {
+	return &changeConsumerFuncInstanceFactory{f}
 }
+
+type changeConsumerFuncInstanceFactory struct {
+	f ChangeConsumerFunc
+}
+
+func (ccfif *changeConsumerFuncInstanceFactory) CreateChangeConsumer(input CreateChangeConsumerInput) (ChangeConsumer, error) {
+	return &changeConsumerFuncInstance{
+		tableName: input.TableName,
+		f:         ccfif.f,
+	}, nil
+}
+
+type changeConsumerFuncInstance struct {
+	tableName string
+	f         ChangeConsumerFunc
+}
+
+func (ccfi *changeConsumerFuncInstance) End() {} // TODO: Snapshot here?
+func (ccfi *changeConsumerFuncInstance) Consume(change Change) error {
+	return ccfi.f(ccfi.tableName, change)
+}
+
+type ChangeConsumerFunc func(tableName string, change Change) error
 
 // An adapter over gocql.Iterator
 type changeRowIterator struct {

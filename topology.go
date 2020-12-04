@@ -35,10 +35,10 @@ const (
 
 type generation struct {
 	startTime time.Time
-	streams   []stream
+	streams   []StreamID
 }
 
-type stream []byte
+type StreamID []byte
 
 type generationList []*generation
 

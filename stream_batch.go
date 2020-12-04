@@ -12,7 +12,7 @@ import (
 
 type streamBatchReader struct {
 	config        *ReaderConfig
-	streams       []stream
+	streams       []StreamID
 	baseTableName string
 
 	lastTimestamp gocql.UUID
@@ -23,7 +23,7 @@ type streamBatchReader struct {
 
 func newStreamBatchReader(
 	config *ReaderConfig,
-	streams []stream,
+	streams []StreamID,
 	baseTableName string,
 	startFrom gocql.UUID,
 ) *streamBatchReader {
@@ -39,6 +39,16 @@ func newStreamBatchReader(
 }
 
 func (sbr *streamBatchReader) run(ctx context.Context) (gocql.UUID, error) {
+	input := CreateChangeConsumerInput{
+		TableName: sbr.baseTableName,
+		streamIDs: sbr.streams,
+	}
+	consumer, err := sbr.config.ChangeConsumerFactory.CreateChangeConsumer(input)
+	if err != nil {
+		sbr.config.Logger.Printf("error while creating change consumer (will quit): %s", err)
+	}
+	defer consumer.End()
+
 	// Prepare the primary key condition
 	var pkCondition string
 	if len(sbr.streams) == 1 {
@@ -107,7 +117,11 @@ outer:
 					if c.cdcCols.endOfBatch {
 						change.StreamID = streamCols.streamID
 						change.Time = streamCols.time
-						sbr.config.ChangeConsumer.Consume(sbr.baseTableName, change)
+						if err := consumer.Consume(change); err != nil {
+							// TODO: Does that make sense?
+							sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
+							return sbr.lastTimestamp, err
+						}
 
 						change.Preimage = nil
 						change.Delta = nil

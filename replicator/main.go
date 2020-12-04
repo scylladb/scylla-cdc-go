@@ -110,31 +110,6 @@ func MakeReplicator(
 		return nil, err
 	}
 
-	tableReplicators := make(map[string]scylla_cdc.ChangeConsumer)
-	logTableNames := make([]string, 0)
-
-	for _, tableName := range tableNames {
-		splitTableName := strings.SplitN(tableName, ".", 2)
-		if len(splitTableName) < 2 {
-			return nil, fmt.Errorf("table name is not fully qualified: %s", tableName)
-		}
-
-		kmeta, err := destinationSession.KeyspaceMetadata(splitTableName[0])
-		if err != nil {
-			destinationSession.Close()
-			return nil, err
-		}
-		tmeta, ok := kmeta.Tables[splitTableName[1]]
-		if !ok {
-			destinationSession.Close()
-			return nil, fmt.Errorf("table %s does not exist", tableName)
-		}
-		tableReplicators[tableName] = NewDeltaReplicator(destinationSession, tmeta, consistency)
-		logTableNames = append(logTableNames, tableName)
-	}
-
-	replicator := &TableRoutingConsumer{tableReplicators}
-
 	tracker := scylla_cdc.NewClusterStateTracker(gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy()))
 
 	// Configure a session
@@ -146,11 +121,16 @@ func MakeReplicator(
 		return nil, err
 	}
 
+	factory := &replicatorFactory{
+		destinationSession: destinationSession,
+		consistency:        consistency,
+	}
+
 	// Configuration for the CDC reader
 	cfg := scylla_cdc.NewReaderConfig(
 		session,
-		replicator,
-		logTableNames...,
+		factory,
+		tableNames...,
 	)
 	if advancedParams != nil {
 		cfg.Advanced = *advancedParams
@@ -170,16 +150,29 @@ func MakeReplicator(
 	return reader, nil
 }
 
-// TODO: We could actually put this one in the lib
-type TableRoutingConsumer struct {
-	tableConsumers map[string]scylla_cdc.ChangeConsumer
+type replicatorFactory struct {
+	destinationSession *gocql.Session
+	consistency        gocql.Consistency
 }
 
-func (trc *TableRoutingConsumer) Consume(tableName string, change scylla_cdc.Change) {
-	consumer, present := trc.tableConsumers[tableName]
-	if present {
-		consumer.Consume(tableName, change)
+func (rf *replicatorFactory) CreateChangeConsumer(input scylla_cdc.CreateChangeConsumerInput) (scylla_cdc.ChangeConsumer, error) {
+	splitTableName := strings.SplitN(input.TableName, ".", 2)
+	if len(splitTableName) < 2 {
+		return nil, fmt.Errorf("table name is not fully qualified: %s", input.TableName)
 	}
+
+	kmeta, err := rf.destinationSession.KeyspaceMetadata(splitTableName[0])
+	if err != nil {
+		rf.destinationSession.Close()
+		return nil, err
+	}
+	tmeta, ok := kmeta.Tables[splitTableName[1]]
+	if !ok {
+		rf.destinationSession.Close()
+		return nil, fmt.Errorf("table %s does not exist", input.TableName)
+	}
+
+	return NewDeltaReplicator(rf.destinationSession, tmeta, rf.consistency), nil
 }
 
 type DeltaReplicator struct {
@@ -376,51 +369,62 @@ func (r *DeltaReplicator) computeRangeDeleteQueries() {
 	}
 }
 
-func (r *DeltaReplicator) Consume(tableName string, c scylla_cdc.Change) {
+func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
 	timestamp := c.GetCassandraTimestamp()
 	pos := 0
 
 	for pos < len(c.Delta) {
 		change := c.Delta[pos]
+		var err error
 		switch change.GetOperation() {
 		case scylla_cdc.Update:
-			r.processUpdate(timestamp, change)
+			err = r.processUpdate(timestamp, change)
 			pos++
 
 		case scylla_cdc.Insert:
-			r.processInsert(timestamp, change)
+			err = r.processInsert(timestamp, change)
 			pos++
 
 		case scylla_cdc.RowDelete:
-			r.processRowDelete(timestamp, change)
+			err = r.processRowDelete(timestamp, change)
 			pos++
 
 		case scylla_cdc.PartitionDelete:
-			r.processPartitionDelete(timestamp, change)
+			err = r.processPartitionDelete(timestamp, change)
 			pos++
 
 		case scylla_cdc.RangeDeleteStartInclusive, scylla_cdc.RangeDeleteStartExclusive:
 			// TODO: Check that we aren't at the end?
 			start := change
 			end := c.Delta[pos+1]
-			r.processRangeDelete(timestamp, start, end)
+			err = r.processRangeDelete(timestamp, start, end)
 			pos += 2
 
 		default:
 			panic("unsupported operation: " + change.GetOperation().String())
 		}
+
+		if err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
-func (r *DeltaReplicator) processUpdate(timestamp int64, c *scylla_cdc.ChangeRow) {
-	r.processInsertOrUpdate(timestamp, false, c)
+func (r *DeltaReplicator) End() {
+	// TODO: Take a snapshot here
 }
 
-func (r *DeltaReplicator) processInsert(timestamp int64, c *scylla_cdc.ChangeRow) {
-	r.processInsertOrUpdate(timestamp, true, c)
+func (r *DeltaReplicator) processUpdate(timestamp int64, c *scylla_cdc.ChangeRow) error {
+	return r.processInsertOrUpdate(timestamp, false, c)
 }
 
-func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, c *scylla_cdc.ChangeRow) {
+func (r *DeltaReplicator) processInsert(timestamp int64, c *scylla_cdc.ChangeRow) error {
+	return r.processInsertOrUpdate(timestamp, true, c)
+}
+
+func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, c *scylla_cdc.ChangeRow) error {
 	overwriteVals := make([]interface{}, 0, len(r.allColumns)+1)
 
 	if !isInsert {
@@ -625,9 +629,11 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 		}
 		fmt.Printf("ERROR while trying to %s: %s\n", typ, err)
 	}
+
+	return err
 }
 
-func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.ChangeRow) {
+func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.ChangeRow) error {
 	// TODO: Cache vals?
 	vals := make([]interface{}, 0, len(r.pkColumns)+len(r.ckColumns))
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
@@ -648,9 +654,11 @@ func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.Change
 	if err != nil {
 		fmt.Printf("ERROR while trying to delete row: %s\n", err)
 	}
+
+	return err
 }
 
-func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.ChangeRow) {
+func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.ChangeRow) error {
 	// TODO: Cache vals?
 	vals := make([]interface{}, 0, len(r.pkColumns))
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
@@ -660,7 +668,6 @@ func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.
 		fmt.Println(vals...)
 	}
 
-	// TODO: Propagate errors
 	err := r.session.
 		Query(r.partitionDeleteQueryStr, vals...).
 		Consistency(r.consistency).
@@ -670,9 +677,12 @@ func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.
 	if err != nil {
 		fmt.Printf("ERROR while trying to delete partition: %s\n", err)
 	}
+
+	// TODO: Retries
+	return err
 }
 
-func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla_cdc.ChangeRow) {
+func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla_cdc.ChangeRow) error {
 	// TODO: Cache vals?
 	vals := make([]interface{}, 0, len(r.pkColumns)+len(r.ckColumns)+1)
 	vals = appendKeyValuesToBind(vals, r.pkColumns, start)
@@ -749,7 +759,6 @@ func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla
 		fmt.Println(vals...)
 	}
 
-	// TODO: Propagate errors
 	err := r.session.
 		Query(queryStr, vals...).
 		Consistency(r.consistency).
@@ -759,6 +768,9 @@ func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla
 	if err != nil {
 		fmt.Printf("ERROR while trying to delete range: %s\n", err)
 	}
+
+	// TODO: Retries
+	return err
 }
 
 func (r *DeltaReplicator) makeBindMarkerAssignmentList(columnNames []string) []string {

@@ -25,8 +25,9 @@ type ReaderConfig struct {
 	// Consistency to use when querying CDC log
 	Consistency gocql.Consistency
 
+	// Creates ChangeProcessors, which process information fetched from the CDC log.
 	// A callback which processes information fetched from the CDC log.
-	ChangeConsumer ChangeConsumer
+	ChangeConsumerFactory ChangeConsumerFactory
 
 	// An object which tracks cluster metadata such as current tokens and node count.
 	// While this object is optional, it is highly recommended that this field points to a valid ClusterStateTracker.
@@ -55,14 +56,14 @@ type AdvancedReaderConfig struct {
 // Creates a ReaderConfig struct with safe defaults.
 func NewReaderConfig(
 	session *gocql.Session,
-	consumer ChangeConsumer,
+	consumerFactory ChangeConsumerFactory,
 	tableNames ...string,
 ) *ReaderConfig {
 	return &ReaderConfig{
-		Session:        session,
-		TableNames:     tableNames,
-		Consistency:    gocql.Quorum,
-		ChangeConsumer: consumer,
+		Session:               session,
+		TableNames:            tableNames,
+		Consistency:           gocql.Quorum,
+		ChangeConsumerFactory: consumerFactory,
 
 		Advanced: AdvancedReaderConfig{
 			ConfidenceWindowSize: 30 * time.Second,
@@ -249,18 +250,18 @@ func (r *Reader) StopAt(at time.Time) {
 	close(r.stoppedCh)
 }
 
-func (r *Reader) splitStreams(streams []stream) (split [][]stream, err error) {
+func (r *Reader) splitStreams(streams []StreamID) (split [][]StreamID, err error) {
 	if r.config.ClusterStateTracker == nil {
 		// This method of polling is quite bad for performance, but we cannot do better without the tracker
 		// TODO: Maybe forbid, or at least warn?
 		for _, s := range streams {
-			split = append(split, []stream{s})
+			split = append(split, []StreamID{s})
 		}
 		return
 	}
 
 	tokens := r.config.ClusterStateTracker.GetTokens()
-	vnodesToStreams := make(map[int64][]stream, 0)
+	vnodesToStreams := make(map[int64][]StreamID, 0)
 
 	for _, stream := range streams {
 		var streamInt int64
@@ -277,7 +278,7 @@ func (r *Reader) splitStreams(streams []stream) (split [][]stream, err error) {
 		vnodesToStreams[chosenTok] = append(vnodesToStreams[chosenTok], stream)
 	}
 
-	groups := make([][]stream, 0, len(vnodesToStreams))
+	groups := make([][]StreamID, 0, len(vnodesToStreams))
 	for _, streams := range vnodesToStreams {
 		groups = append(groups, streams)
 	}
