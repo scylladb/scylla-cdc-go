@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -169,11 +170,14 @@ func (r *Reader) Run(ctx context.Context) error {
 
 			readers := make([]*streamBatchReader, 0, len(split)*len(r.config.TableNames))
 			for _, tableName := range r.config.TableNames {
+				// TODO: This is ugly?
+				splitName := strings.SplitN(tableName, ".", 2)
 				for _, group := range split {
 					readers = append(readers, newStreamBatchReader(
 						r.config,
 						group,
-						tableName,
+						splitName[0],
+						splitName[1],
 						gocql.MinTimeUUID(r.readFrom),
 					))
 				}

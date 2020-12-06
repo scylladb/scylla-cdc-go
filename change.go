@@ -185,7 +185,7 @@ func (c *ChangeRow) String() string {
 
 type CreateChangeConsumerInput struct {
 	TableName string
-	streamIDs []StreamID
+	StreamIDs []StreamID
 }
 
 type ChangeConsumerFactory interface {
@@ -224,6 +224,83 @@ func (ccfi *changeConsumerFuncInstance) Consume(change Change) error {
 
 type ChangeConsumerFunc func(tableName string, change Change) error
 
+type changeRowQuerier struct {
+	keyspaceName string
+	tableName    string
+	session      *gocql.Session
+
+	pkCondition string
+	bindArgs    []interface{}
+}
+
+func newChangeRowQuerier(session *gocql.Session, streams []StreamID, keyspaceName, tableName string) *changeRowQuerier {
+	var pkCondition string
+	if len(streams) == 1 {
+		pkCondition = "\"cdc$stream_id\" = ?"
+	} else {
+		pkCondition = "\"cdc$stream_id\" IN (?" + strings.Repeat(", ?", len(streams)-1) + ")"
+	}
+
+	bindArgs := make([]interface{}, len(streams)+2)
+	for i, stream := range streams {
+		bindArgs[i] = stream
+	}
+
+	return &changeRowQuerier{
+		keyspaceName: keyspaceName,
+		tableName:    tableName,
+		session:      session,
+
+		pkCondition: pkCondition,
+		bindArgs:    bindArgs,
+	}
+}
+
+func (crq *changeRowQuerier) queryRange(start gocql.UUID, end gocql.UUID) (*changeRowIterator, error) {
+	// We need metadata to check if there are any tuples
+	kmeta, err := crq.session.KeyspaceMetadata(crq.keyspaceName)
+	if err != nil {
+		return nil, err
+	}
+
+	tmeta, ok := kmeta.Tables[crq.tableName+cdcTableSuffix]
+	if !ok {
+		return nil, fmt.Errorf("no such table: %s.%s", crq.keyspaceName, crq.tableName)
+	}
+
+	var colNames []string
+	var tupleNames []string
+	for _, col := range tmeta.Columns {
+		if strings.HasPrefix(col.Type, "frozen<tuple<") || strings.HasPrefix(col.Type, "tuple<") {
+			tupleNames = append(tupleNames, col.Name)
+			colNames = append(colNames, fmt.Sprintf("writetime(%s)", EscapeColumnNameIfNeeded(col.Name)))
+		}
+	}
+
+	if len(tupleNames) == 0 {
+		colNames = []string{"*"}
+	} else {
+		for name := range tmeta.Columns {
+			colNames = append(colNames, EscapeColumnNameIfNeeded(name))
+		}
+	}
+
+	queryStr := fmt.Sprintf(
+		"SELECT %s FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" < ? BYPASS CACHE",
+		strings.Join(colNames, ", "),
+		crq.keyspaceName,
+		crq.tableName,
+		cdcTableSuffix,
+		crq.pkCondition,
+	)
+
+	crq.bindArgs[len(crq.bindArgs)-2] = start
+	crq.bindArgs[len(crq.bindArgs)-1] = end
+
+	iter := crq.session.Query(queryStr, crq.bindArgs...).Iter()
+	return newChangeRowIterator(iter, tupleNames)
+}
+
 // An adapter over gocql.Iterator
 type changeRowIterator struct {
 	iter         *gocql.Iter
@@ -232,10 +309,12 @@ type changeRowIterator struct {
 	cdcStreamCols cdcStreamCols
 	cdcChangeCols cdcChangeCols
 
-	colInfos []gocql.ColumnInfo
+	colInfos        []gocql.ColumnInfo
+	tupleNameToIdx  map[string]int
+	tupleWriteTimes []int64
 }
 
-func newChangeRowIterator(iter *gocql.Iter) *changeRowIterator {
+func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIterator, error) {
 	// TODO: Check how costly is the reflection here
 	// We could amortize the cost by preparing the dataFields only at the
 	// beginning of the iteration, and change them only if the fields
@@ -244,13 +323,35 @@ func newChangeRowIterator(iter *gocql.Iter) *changeRowIterator {
 
 	allCols := iter.Columns()
 
+	if len(allCols) == 0 {
+		// No columns indicate an error
+		return nil, iter.Close()
+	}
+
+	tupleNameToIdx := make(map[string]int, len(tupleNames))
+	for i, name := range tupleNames {
+		tupleNameToIdx[name] = i
+	}
+
 	ci := &changeRowIterator{
 		iter:         iter,
 		columnValues: make([]interface{}, 0, len(allCols)),
 		colInfos:     make([]gocql.ColumnInfo, 0, len(allCols)),
+
+		tupleNameToIdx:  tupleNameToIdx,
+		tupleWriteTimes: make([]int64, len(tupleNames)),
 	}
 
+	for i := range tupleNames {
+		ci.columnValues = append(ci.columnValues, &ci.tupleWriteTimes[i])
+	}
+
+	colNames := make([]string, 0)
 	for _, col := range allCols {
+		colNames = append(colNames, col.Name)
+	}
+
+	for _, col := range allCols[len(tupleNames):] {
 		if !strings.HasPrefix(col.Name, "cdc$") {
 			ci.colInfos = append(ci.colInfos, col)
 		}
@@ -287,7 +388,7 @@ func newChangeRowIterator(iter *gocql.Iter) *changeRowIterator {
 		}
 	}
 
-	return ci
+	return ci, nil
 }
 
 func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
@@ -306,8 +407,9 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 		colInfos: ci.colInfos,
 	}
 
-	pos := 0
-	for _, col := range ci.iter.Columns() {
+	// At the beginning, there are writetime()
+	pos := len(ci.tupleWriteTimes)
+	for _, col := range ci.iter.Columns()[len(ci.tupleWriteTimes):] {
 		// TODO: Optimize
 		if strings.HasPrefix(col.Name, "cdc$") && !strings.HasPrefix(col.Name, "cdc$deleted_") {
 			pos++
@@ -323,12 +425,18 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 			// we would also have to artificially split cdc$deleted_v
 			// into cdc$deleted_v[0], cdc$deleted_v[1]...
 
-			// TODO: Check if the tuple was null
+			// Check the writetime of the tuple
+			// If the tuple was null, then the writetime will be null (zero in our case)
+			// This is a workaround needed because gocql does not differentiate
+			// null tuples from tuples which have all their elements as null
 			tupLen := len(tupTyp.Elems)
-			v := make([]interface{}, tupLen)
-			copy(v, ci.columnValues[pos:pos+tupLen])
+			tupIdx := ci.tupleNameToIdx[col.Name]
+			if ci.tupleWriteTimes[tupIdx] != 0 {
+				v := make([]interface{}, tupLen)
+				copy(v, ci.columnValues[pos:pos+tupLen])
 
-			change.data[col.Name] = v
+				change.data[col.Name] = v
+			}
 			pos += tupLen
 		} else {
 			v, notNull := maybeDereferenceTwice(ci.columnValues[pos])
