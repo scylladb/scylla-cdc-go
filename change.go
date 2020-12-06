@@ -71,6 +71,8 @@ func (c *Change) GetCassandraTimestamp() int64 {
 type ChangeRow struct {
 	data    map[string]interface{}
 	cdcCols cdcChangeCols
+
+	colInfos []gocql.ColumnInfo
 }
 
 type cdcStreamCols struct {
@@ -103,14 +105,24 @@ func (c *ChangeRow) GetValue(columnName string) (interface{}, bool) {
 
 // IsDeleted returns a boolean indicating if given column was set to null.
 // This only works for clustering columns.
-func (c *ChangeRow) IsDeleted(columnName string) bool {
-	return c.data["cdc$deleted_"+columnName].(bool)
+func (c *ChangeRow) IsDeleted(columnName string) (bool, bool) {
+	v, ok := c.data["cdc$deleted_"+columnName]
+	if !ok {
+		return false, false
+	}
+	return v.(bool), true
 }
 
 // GetDeletedElements returns which elements were deleted from the non-atomic column.
 // This function works only for non-atomic columns
-func (c *ChangeRow) GetDeletedElements(columnName string) interface{} {
-	return c.data["cdc$deleted_elements_"+columnName]
+func (c *ChangeRow) GetDeletedElements(columnName string) (interface{}, bool) {
+	v, ok := c.data["cdc$deleted_elements_"+columnName]
+	return v, ok
+}
+
+// Columns returns information about data columns in the cdc log table (without those with "cdc$" prefix)
+func (c *ChangeRow) Columns() []gocql.ColumnInfo {
+	return c.colInfos
 }
 
 func (c *ChangeRow) String() string {
@@ -220,6 +232,8 @@ type changeRowIterator struct {
 
 	cdcStreamCols cdcStreamCols
 	cdcChangeCols cdcChangeCols
+
+	colInfos []gocql.ColumnInfo
 }
 
 func newChangeRowIterator(iter *gocql.Iter) (*changeRowIterator, error) {
@@ -237,10 +251,19 @@ func newChangeRowIterator(iter *gocql.Iter) (*changeRowIterator, error) {
 	columnNames := rowData.Columns
 	columnValues := rowData.Values
 
+	colInfos := make([]gocql.ColumnInfo, 0, len(columnNames))
+	for _, col := range iter.Columns() {
+		if !strings.HasPrefix(col.Name, "cdc$") {
+			colInfos = append(colInfos, col)
+		}
+	}
+
 	ci := &changeRowIterator{
 		iter:         iter,
 		columnNames:  columnNames,
 		columnValues: columnValues,
+
+		colInfos: colInfos,
 	}
 
 	for i := 0; i < len(columnNames); i++ {
@@ -288,8 +311,9 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 	// if they want to preserve data across Next() calls
 	// TODO: Can we design an interface which scans into user-provided struct?
 	change := &ChangeRow{
-		data:    make(map[string]interface{}, len(ci.columnValues)-6),
-		cdcCols: ci.cdcChangeCols,
+		data:     make(map[string]interface{}, len(ci.columnValues)-6),
+		cdcCols:  ci.cdcChangeCols,
+		colInfos: ci.colInfos,
 	}
 	for i, name := range ci.columnNames {
 		if name != "" {

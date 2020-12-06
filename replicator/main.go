@@ -439,7 +439,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 		isNonFrozenCollection := !typ.IsFrozen() && typ.Type().IsCollection()
 
 		v, hasV := c.GetValue(colName)
-		isDeleted := c.IsDeleted(colName)
+		isDeleted, _ := c.IsDeleted(colName)
 
 		if !isNonFrozenCollection {
 			if typ.Type() == TypeTuple {
@@ -467,7 +467,8 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 			}
 		} else {
 			pcuq := &r.perColumnUpdateQueries[i]
-			rDelEls := reflect.ValueOf(c.GetDeletedElements(colName))
+			delEls, _ := c.GetDeletedElements(colName)
+			rDelEls := reflect.ValueOf(delEls)
 			delElsLen := rDelEls.Len()
 			if typ.Type() == TypeList {
 				overwriteVals = append(overwriteVals, gocql.UnsetValue)
