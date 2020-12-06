@@ -227,7 +227,6 @@ type ChangeConsumerFunc func(tableName string, change Change) error
 // An adapter over gocql.Iterator
 type changeRowIterator struct {
 	iter         *gocql.Iter
-	columnNames  []string
 	columnValues []interface{}
 
 	cdcStreamCols cdcStreamCols
@@ -236,68 +235,59 @@ type changeRowIterator struct {
 	colInfos []gocql.ColumnInfo
 }
 
-func newChangeRowIterator(iter *gocql.Iter) (*changeRowIterator, error) {
+func newChangeRowIterator(iter *gocql.Iter) *changeRowIterator {
 	// TODO: Check how costly is the reflection here
 	// We could amortize the cost by preparing the dataFields only at the
 	// beginning of the iteration, and change them only if the fields
 	// have changed
 	// This possibility should be looked into
 
-	// Prepare row data
-	rowData, err := iter.RowData()
-	if err != nil {
-		return nil, err
-	}
-	columnNames := rowData.Columns
-	columnValues := rowData.Values
-
-	colInfos := make([]gocql.ColumnInfo, 0, len(columnNames))
-	for _, col := range iter.Columns() {
-		if !strings.HasPrefix(col.Name, "cdc$") {
-			colInfos = append(colInfos, col)
-		}
-	}
+	allCols := iter.Columns()
 
 	ci := &changeRowIterator{
 		iter:         iter,
-		columnNames:  columnNames,
-		columnValues: columnValues,
-
-		colInfos: colInfos,
+		columnValues: make([]interface{}, 0, len(allCols)),
+		colInfos:     make([]gocql.ColumnInfo, 0, len(allCols)),
 	}
 
-	for i := 0; i < len(columnNames); i++ {
-		columnName := columnNames[i]
-		clearColumnName := true
-		switch columnName {
-		case "cdc$stream_id":
-			columnValues[i] = &ci.cdcStreamCols.streamID
-		case "cdc$time":
-			columnValues[i] = &ci.cdcStreamCols.time
-		case "cdc$batch_seq_no":
-			columnValues[i] = &ci.cdcChangeCols.batchSeqNo
-		case "cdc$ttl":
-			columnValues[i] = &ci.cdcChangeCols.ttl
-		case "cdc$operation":
-			columnValues[i] = &ci.cdcChangeCols.operation
-		case "cdc$end_of_batch":
-			columnValues[i] = &ci.cdcChangeCols.endOfBatch
+	for _, col := range allCols {
+		if !strings.HasPrefix(col.Name, "cdc$") {
+			ci.colInfos = append(ci.colInfos, col)
+		}
 
-		default:
-			if !strings.HasPrefix(columnName, "cdc$deleted_") {
-				// All non-cdc fields should be nullable
-				columnValues[i] = reflect.New(reflect.TypeOf(columnValues[i])).Interface()
+		if tupTyp, ok := col.TypeInfo.(gocql.TupleTypeInfo); ok {
+			for _, el := range tupTyp.Elems {
+				ci.columnValues = append(ci.columnValues, reflect.New(reflect.TypeOf(el.New())).Interface())
 			}
-			clearColumnName = false
-		}
+		} else {
+			var cval interface{}
+			switch col.Name {
+			case "cdc$stream_id":
+				cval = &ci.cdcStreamCols.streamID
+			case "cdc$time":
+				cval = &ci.cdcStreamCols.time
+			case "cdc$batch_seq_no":
+				cval = &ci.cdcChangeCols.batchSeqNo
+			case "cdc$ttl":
+				cval = &ci.cdcChangeCols.ttl
+			case "cdc$operation":
+				cval = &ci.cdcChangeCols.operation
+			case "cdc$end_of_batch":
+				cval = &ci.cdcChangeCols.endOfBatch
 
-		if clearColumnName {
-			// Don't put always-occurring cdc columns into the map
-			columnNames[i] = ""
+			default:
+				if !strings.HasPrefix(col.Name, "cdc$deleted_") {
+					// All non-cdc fields should be nullable
+					cval = reflect.New(reflect.TypeOf(col.TypeInfo.New())).Interface()
+				} else {
+					cval = col.TypeInfo.New()
+				}
+			}
+			ci.columnValues = append(ci.columnValues, cval)
 		}
 	}
 
-	return ci, nil
+	return ci
 }
 
 func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
@@ -315,12 +305,37 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 		cdcCols:  ci.cdcChangeCols,
 		colInfos: ci.colInfos,
 	}
-	for i, name := range ci.columnNames {
-		if name != "" {
-			v, notNull := maybeDereferenceTwice(ci.columnValues[i])
+
+	pos := 0
+	for _, col := range ci.iter.Columns() {
+		// TODO: Optimize
+		if strings.HasPrefix(col.Name, "cdc$") && !strings.HasPrefix(col.Name, "cdc$deleted_") {
+			pos++
+			continue
+		}
+
+		if tupTyp, ok := col.TypeInfo.(gocql.TupleTypeInfo); ok {
+			// We deviate from gocql's convention here - we represent a tuple
+			// as an []interface{}, we don't keep a separate column for each
+			// tuple element.
+			// This was made in order to avoid confusion with respect to
+			// the cdc log table - if we split tuple v into v[0], v[1], ...,
+			// we would also have to artificially split cdc$deleted_v
+			// into cdc$deleted_v[0], cdc$deleted_v[1]...
+
+			// TODO: Check if the tuple was null
+			tupLen := len(tupTyp.Elems)
+			v := make([]interface{}, tupLen)
+			copy(v, ci.columnValues[pos:pos+tupLen])
+
+			change.data[col.Name] = v
+			pos += tupLen
+		} else {
+			v, notNull := maybeDereferenceTwice(ci.columnValues[pos])
 			if notNull {
-				change.data[name] = v
+				change.data[col.Name] = v
 			}
+			pos++
 		}
 	}
 	return ci.cdcStreamCols, change

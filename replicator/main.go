@@ -444,14 +444,15 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 		if !isNonFrozenCollection {
 			if typ.Type() == TypeTuple {
 				tupleTyp := typ.Unfrozen().(*TupleType)
-				for i := range tupleTyp.Elements {
-					v, hasV := c.GetValue(gocql.TupleColumnName(colName, i))
-					if hasV {
-						overwriteVals = append(overwriteVals, v)
-					} else if isDeleted {
-						overwriteVals = append(overwriteVals, nil)
-					} else {
-						overwriteVals = append(overwriteVals, gocql.UnsetValue)
+				if hasV {
+					overwriteVals = append(overwriteVals, v.([]interface{})...)
+				} else {
+					for range tupleTyp.Elements {
+						if isDeleted {
+							overwriteVals = append(overwriteVals, nil)
+						} else {
+							overwriteVals = append(overwriteVals, gocql.UnsetValue)
+						}
 					}
 				}
 			} else {

@@ -95,50 +95,46 @@ outer:
 			// Set the time interval from which we need to return data
 			bindArgs[len(bindArgs)-2] = sbr.lastTimestamp
 			bindArgs[len(bindArgs)-1] = pollEnd
-			iter, err := newChangeRowIterator(q.Bind(bindArgs...).Iter())
-			if err != nil {
-				sbr.config.Logger.Printf("error while quering (will retry): %s", err)
-			} else {
-				var change Change
-				for {
-					streamCols, c := iter.Next()
-					if c == nil {
-						break
-					}
-
-					if c.GetOperation() == PreImage {
-						change.Preimage = append(change.Preimage, c)
-					} else if c.GetOperation() == PostImage {
-						change.Postimage = append(change.Postimage, c)
-					} else {
-						change.Delta = append(change.Delta, c)
-					}
-
-					if c.cdcCols.endOfBatch {
-						change.StreamID = streamCols.streamID
-						change.Time = streamCols.time
-						if err := consumer.Consume(change); err != nil {
-							// TODO: Does that make sense?
-							sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
-							return sbr.lastTimestamp, err
-						}
-
-						change.Preimage = nil
-						change.Delta = nil
-						change.Postimage = nil
-
-						// Update the last timestamp only after we processed whole batch
-						if CompareTimeuuid(sbr.lastTimestamp, streamCols.time) < 0 {
-							sbr.lastTimestamp = streamCols.time
-						}
-					}
-
-					rowCount++
+			iter := newChangeRowIterator(q.Bind(bindArgs...).Iter())
+			var change Change
+			for {
+				streamCols, c := iter.Next()
+				if c == nil {
+					break
 				}
 
-				if err = iter.Close(); err != nil {
-					sbr.config.Logger.Printf("error while querying (will retry): %s", err)
+				if c.GetOperation() == PreImage {
+					change.Preimage = append(change.Preimage, c)
+				} else if c.GetOperation() == PostImage {
+					change.Postimage = append(change.Postimage, c)
+				} else {
+					change.Delta = append(change.Delta, c)
 				}
+
+				if c.cdcCols.endOfBatch {
+					change.StreamID = streamCols.streamID
+					change.Time = streamCols.time
+					if err := consumer.Consume(change); err != nil {
+						// TODO: Does that make sense?
+						sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
+						return sbr.lastTimestamp, err
+					}
+
+					change.Preimage = nil
+					change.Delta = nil
+					change.Postimage = nil
+
+					// Update the last timestamp only after we processed whole batch
+					if CompareTimeuuid(sbr.lastTimestamp, streamCols.time) < 0 {
+						sbr.lastTimestamp = streamCols.time
+					}
+				}
+
+				rowCount++
+			}
+
+			if err = iter.Close(); err != nil {
+				sbr.config.Logger.Printf("error while querying (will retry): %s", err)
 			}
 		} else {
 			// sbr.config.Logger.Printf("not polling")
