@@ -43,8 +43,5 @@ func shouldEscape(s string) bool {
 }
 
 func escapeColumnName(s string) string {
-	if strings.IndexRune(s, '"') == -1 {
-		return "\"" + s + "\""
-	}
 	return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\""
 }
