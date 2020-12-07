@@ -172,7 +172,7 @@ func (rf *replicatorFactory) CreateChangeConsumer(input scylla_cdc.CreateChangeC
 		return nil, fmt.Errorf("table %s does not exist", input.TableName)
 	}
 
-	return NewDeltaReplicator(rf.destinationSession, tmeta, rf.consistency), nil
+	return NewDeltaReplicator(rf.destinationSession, kmeta, tmeta, rf.consistency)
 }
 
 type DeltaReplicator struct {
@@ -189,6 +189,7 @@ type DeltaReplicator struct {
 	insertQueryStr          string
 	updateQueryStr          string
 	perColumnUpdateQueries  []updateQuerySet
+	udtInfos                []udtInfo
 	rowDeleteQueryStr       string
 	partitionDeleteQueryStr string
 	rangeDeleteQueryStrs    []string
@@ -199,7 +200,12 @@ type updateQuerySet struct {
 	remove string
 }
 
-func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata, consistency gocql.Consistency) *DeltaReplicator {
+type udtInfo struct {
+	setterQuery string
+	fields      []string
+}
+
+func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, meta *gocql.TableMetadata, consistency gocql.Consistency) (*DeltaReplicator, error) {
 	var (
 		pkColumns    []string
 		ckColumns    []string
@@ -238,11 +244,14 @@ func NewDeltaReplicator(session *gocql.Session, meta *gocql.TableMetadata, consi
 
 	dr.computeInsertQuery()
 	dr.computeUpdateQueries()
+	if err := dr.computeUDTQueries(kmeta); err != nil {
+		return nil, err
+	}
 	dr.computeRowDeleteQuery()
 	dr.computePartitionDeleteQuery()
 	dr.computeRangeDeleteQueries()
 
-	return dr
+	return dr, nil
 }
 
 func (r *DeltaReplicator) computeUpdateQueries() {
@@ -298,6 +307,42 @@ func (r *DeltaReplicator) computeUpdateQueries() {
 	}
 
 	r.perColumnUpdateQueries = queries
+}
+
+func (r *DeltaReplicator) computeUDTQueries(kmeta *gocql.KeyspaceMetadata) error {
+	keyColumns := append(append([]string{}, r.pkColumns...), r.ckColumns...)
+	conditions := r.makeBindMarkerAssignments(keyColumns, " AND ")
+
+	queries := make([]udtInfo, 0, len(r.otherColumns))
+	for i, colName := range r.otherColumns {
+		typ := r.columnTypes[colName]
+		if typ.IsFrozen() || typ.Type() != TypeUDT {
+			continue
+		}
+
+		name := typ.Unfrozen().(*UDTType).Name
+		typDesc, ok := kmeta.Types[name]
+		if !ok {
+			return fmt.Errorf("type %s does not exist in keyspace %s", name, kmeta.Name)
+		}
+
+		var assignments []string
+		// TODO: What about tuples?
+		for _, fieldName := range typDesc.FieldNames {
+			assignments = append(assignments, fmt.Sprintf("%s.%s = ?", colName, fieldName))
+		}
+
+		queries[i].setterQuery = fmt.Sprintf(
+			"UPDATE %s USING TTL ? SET %s WHERE %s",
+			r.tableName,
+			strings.Join(assignments, ", "),
+			conditions,
+		)
+		queries[i].fields = typDesc.FieldNames
+	}
+
+	r.udtInfos = queries
+	return nil
 }
 
 func (r *DeltaReplicator) computeInsertQuery() {
@@ -537,6 +582,50 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 							fmt.Println(setVals...)
 						}
 						batch.Query(pcuq.add, setVals...)
+					}
+				}
+			} else if typ.Type() == TypeUDT {
+				// TODO
+				if hasV {
+					if isDeleted {
+						// The value of the UDT is being overwritten in full
+						overwriteVals = append(overwriteVals, v)
+					} else {
+						// Set some values, remove some values
+						info := &r.udtInfos[i]
+						udtVals := make([]interface{}, len(info.fields)+len(r.pkColumns)+len(r.ckColumns)+1)
+
+						// By default, don't change anything
+						for idx := range udtVals {
+							udtVals[idx+1] = gocql.UnsetValue
+						}
+
+						// Set values for keys for which values are non-null
+						vMap := v.(map[string]interface{})
+						for i, name := range info.fields {
+							v, ok := vMap[name]
+							if ok && !reflect.ValueOf(v).IsNil() {
+								udtVals[i+1] = v
+							}
+						}
+
+						// Remove values for specified indexes
+						deletedElements, ok := c.GetDeletedElements(colName)
+						if ok {
+							deletedIndices := deletedElements.([]int16)
+							for _, idx := range deletedIndices {
+								udtVals[idx+1] = nil
+							}
+						}
+
+						udtVals[0] = c.GetTTL()
+						udtVals = appendKeyValuesToBind(udtVals, r.pkColumns, c)
+						udtVals = appendKeyValuesToBind(udtVals, r.ckColumns, c)
+						if debugQueries {
+							fmt.Println(info.setterQuery)
+							fmt.Println(udtVals...)
+						}
+						batch.Query(info.setterQuery, udtVals...)
 					}
 				}
 			} else {

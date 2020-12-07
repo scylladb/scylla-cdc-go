@@ -23,6 +23,10 @@ type schema struct {
 	createQuery string
 }
 
+var udts = []string{
+	"CREATE TYPE ks.udt_simple (a int, b text, c int)",
+}
+
 var (
 	schemaSimple = schema{
 		"ks.tbl_simple",
@@ -51,6 +55,10 @@ var (
 	schemaTuplesInTuples = schema{
 		"ks.tbl_tuples_in_tuples",
 		"CREATE TABLE ks.tbl_tuples_in_tuples (pk text, ck int, v tuple<tuple<int, text>, int>, PRIMARY KEY (pk, ck))",
+	}
+	schemaUDTs = schema{
+		"ks.tbl_udts",
+		"CREATE TABLE ks.tbl_udts (pk text, ck int, v ks.udt_simple, PRIMARY KEY (pk, ck))",
 	}
 )
 
@@ -231,8 +239,7 @@ var testCases = []struct {
 		},
 	},
 
-	// TODO: UDTs
-
+	// Tuple test cases
 	{
 		schemaTuples,
 		"tupleInserts",
@@ -254,6 +261,8 @@ var testCases = []struct {
 			"UPDATE %s SET v = null WHERE pk = 'tupleUpdates' AND ck = 2",
 			"INSERT INTO %s (pk, ck) VALUES ('tupleUpdates', 3)",
 			"UPDATE %s SET v = (null, null) WHERE pk = 'tupleUpdates' AND ck = 4",
+			"UPDATE %s SET v = ('asdf', null) WHERE pk = 'tupleUpdates' AND ck = 5",
+			"UPDATE %s SET v = (null, 'wsad') WHERE pk = 'tupleUpdates' AND ck = 5",
 		},
 	},
 	{
@@ -264,6 +273,25 @@ var testCases = []struct {
 			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 2, ((3, 'def'), 9))",
 			"UPDATE %s SET v = ((100, 'zyx'), 111) WHERE pk = 'tuplesInTuples' AND ck = 1",
 			"UPDATE %s SET v = null WHERE pk = 'tuplesInTuples' AND ck = 2",
+		},
+	},
+
+	// UDT test cases
+	{
+		schemaUDTs,
+		"udt",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 1, (2, 'abc', 3))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 2, {a: 6, c: 7})",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 3, (9, 'def', 4))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 4, (123, 'ghi', 321))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (333, 'jkl', 222))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 6, (432, 'mno', 678))",
+			"UPDATE %s SET v.b = 'qwe' WHERE pk = 'udt' AND ck = 2",
+			"UPDATE %s SET v = nil WHERE pk = 'udt' AND ck = 3",
+			"UPDATE %s SET v = {b: 'tyu', c: 123456} WHERE pk = 'udt' AND ck = 4",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (999, 'zxc', 888))",
+			"UPDATE %s SET v.c = null WHERE pk = 'udt' AND ck = 6",
 		},
 	},
 }
@@ -393,6 +421,10 @@ func createSessionAndSetupSchema(t *testing.T, addr string, withCdc bool, schema
 
 	execQuery(t, session, "DROP KEYSPACE IF EXISTS ks")
 	execQuery(t, session, "CREATE KEYSPACE ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}")
+
+	for _, udt := range udts {
+		execQuery(t, session, udt)
+	}
 
 	for _, tbl := range schemas {
 		tblQuery := tbl

@@ -40,7 +40,7 @@ const (
 
 func (t Type) IsCollection() bool {
 	switch t {
-	case TypeList, TypeMap, TypeSet:
+	case TypeList, TypeMap, TypeSet, TypeUDT:
 		return true
 	default:
 		return false
@@ -150,6 +150,22 @@ func (nt *NativeType) Unfrozen() TypeInfo {
 	return nt
 }
 
+type UDTType struct {
+	Name string
+}
+
+func (ut *UDTType) Type() Type {
+	return TypeUDT
+}
+
+func (ut *UDTType) IsFrozen() bool {
+	return false
+}
+
+func (ut *UDTType) Unfrozen() TypeInfo {
+	return ut
+}
+
 func parseType(str string) TypeInfo {
 	if strings.HasPrefix(str, "frozen<") {
 		innerStr := strings.TrimSuffix(strings.TrimPrefix(str, "frozen<"), ">")
@@ -173,7 +189,11 @@ func parseType(str string) TypeInfo {
 		list := parseTypeList(innerStr)
 		return &TupleType{Elements: list}
 	}
-	return &NativeType{RealType: parseNativeType(str)}
+	typ := parseNativeType(str)
+	if typ == TypeUDT {
+		return &UDTType{Name: str}
+	}
+	return &NativeType{RealType: typ}
 }
 
 func parseTypeList(str string) []TypeInfo {
@@ -247,6 +267,7 @@ func parseNativeType(str string) Type {
 	case "inet":
 		return TypeInet
 	default:
-		return TypeCustom
+		// Assume it's a UDT
+		return TypeUDT
 	}
 }
