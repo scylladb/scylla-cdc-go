@@ -87,6 +87,168 @@ type cdcChangeCols struct {
 	endOfBatch bool
 }
 
+// ScalarChange represents a change to a column of native type, or a frozen
+// type.
+type ScalarChange struct {
+	// Value contains the scalar value of the column.
+	// If the column was not changed or was deleted, it will be nil.
+	//
+	// Type: T or nil interface.
+	Value interface{}
+
+	// IsDeleted tells if this column was set to NULL by this change.
+	IsDeleted bool
+}
+
+// ListChange represents a change to a column
+type ListChange struct {
+	// AppendedElements contains values appended to the list in the form
+	// of map from cell timestamps to values.
+	// If there were no appended values, it can be nil.
+	// For more information about how to interpret it, see README and examples.
+	// TODO: Actually document it in README and examples
+	//
+	// Type: map[gocql.UUID]T, if there were any elements appended, or nil
+	// interface.
+	AppendedElements interface{}
+
+	// TODO: Document, it's not really clear what it is without context,
+	// and it's not very easy to use
+	//
+	// Type: []gocql.UUID if there were any elements removed, or nil interface.
+	RemovedElements []gocql.UUID
+
+	// IsReset tells if the list value was overwritten instead of being
+	// appended to or removed from. If it's true, than AppendedValue will
+	// contain the new state of the list (which can be NULL).
+	IsReset bool
+}
+
+// SetChange represents a change to a column of type set<T>.
+type SetChange struct {
+	// AddedElements contains a slice of values which were added to the set
+	// by the operation. If there were any values added, it will contain
+	// a slice of form []T, where T is gocql's representation of the element
+	// type. If there were no values added, this field can contain a nil
+	// interface.
+	//
+	// Type: []T, if there were any elements added, or nil interface.
+	AddedElements interface{}
+
+	// RemovedElements contains a slice of values which were removed from the set
+	// by the operation. Like AddedValues, it's either a slice or a nil
+	// interface.
+	// Please not that if the operation overwrote the old value of the set
+	// instead of adding/removing elements, this field _will be nil_.
+	// Instead, IsReset field will be set, and AddedValues will contain
+	// the new state of the set.
+	//
+	// Type: []T, if there were any elements removed, or nil interface.
+	RemovedElements interface{}
+
+	// IsReset tells if the set value was overwritten instead of being
+	// appended to or removed from. If it's true, than AppendedValue will
+	// contain the new state of the set (which can be NULL).
+	IsReset bool
+}
+
+// MapChange represents a change to a column of type map<K, V>.
+type MapChange struct {
+	// AddedElements contains a map of elements which were added to the map
+	// by the operation.
+	//
+	// Type: map[K]V, if there were any added values, or nil interface.
+	AddedElements interface{}
+
+	// RemovedElements contains a slice of keys which were removed from the map
+	// by the operation.
+	// Please not that if the operation overwrote the old value of the map
+	// instead of adding/removing elements, this field _will be nil_.
+	// Instead, IsReset field will be set, and AddedValues will contain
+	// the new state of the map.
+	//
+	// Type: []K, if there were any indices removed, or nil interface.
+	RemovedElements interface{}
+
+	// IsReset tells if the map value was overwritten instead of being
+	// appended to or removed from. If it's true, than AppendedValue will
+	// contain the new state of the map (which can be NULL).
+	IsReset bool
+}
+
+// TODO: document UDTChange
+type UDTChange struct {
+	AddedFields map[string]interface{}
+
+	RemovedFields []int16
+
+	IsReset bool
+}
+
+func (c *ChangeRow) GetScalarChange(column string) ScalarChange {
+	v, _ := c.GetValue(column)
+	isDeleted, _ := c.IsDeleted(column)
+	return ScalarChange{
+		Value:     v,
+		IsDeleted: isDeleted,
+	}
+}
+
+func (c *ChangeRow) GetListChange(column string) ListChange {
+	// TODO: Warn about usage with frozen lists
+	// Maybe convert lists to frozen form?
+	// There isn't really a way to do so, though...
+	v, _ := c.GetValue(column)
+	isDeleted, _ := c.IsDeleted(column)
+	deletedElements, _ := c.GetDeletedElements(column)
+	typedDeletedElements, _ := deletedElements.([]gocql.UUID)
+	return ListChange{
+		AppendedElements: v,
+		RemovedElements:  typedDeletedElements,
+		IsReset:          isDeleted,
+	}
+}
+
+func (c *ChangeRow) GetSetChange(column string) SetChange {
+	v, _ := c.GetValue(column)
+	isDeleted, _ := c.IsDeleted(column)
+	deletedElements, _ := c.GetDeletedElements(column)
+	return SetChange{
+		AddedElements:   v,
+		RemovedElements: deletedElements,
+		IsReset:         isDeleted,
+	}
+}
+
+func (c *ChangeRow) GetMapChange(column string) MapChange {
+	v, _ := c.GetValue(column)
+	isDeleted, _ := c.IsDeleted(column)
+	deletedElements, _ := c.GetDeletedElements(column)
+	return MapChange{
+		AddedElements:   v,
+		RemovedElements: deletedElements,
+		IsReset:         isDeleted,
+	}
+}
+
+func (c *ChangeRow) GetUDTChange(column string) UDTChange {
+	v, _ := c.GetValue(column)
+	// TODO: This shouldn't be a pointer!
+	typedV, _ := v.(*map[string]interface{})
+	isDeleted, _ := c.IsDeleted(column)
+	deletedElements, _ := c.GetDeletedElements(column)
+	typedDeletedElements, _ := deletedElements.([]int16)
+	udtC := UDTChange{
+		RemovedFields: typedDeletedElements,
+		IsReset:       isDeleted,
+	}
+
+	if typedV != nil {
+		udtC.AddedFields = *typedV
+	}
+	return udtC
+}
+
 // GetOperation returns the type of operation this change represents
 func (c *ChangeRow) GetOperation() OperationType {
 	return OperationType(c.cdcCols.operation)
