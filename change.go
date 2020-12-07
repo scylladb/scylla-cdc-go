@@ -233,19 +233,16 @@ func (c *ChangeRow) GetMapChange(column string) MapChange {
 
 func (c *ChangeRow) GetUDTChange(column string) UDTChange {
 	v, _ := c.GetValue(column)
-	// TODO: This shouldn't be a pointer!
-	typedV, _ := v.(*map[string]interface{})
+	typedV, _ := v.(map[string]interface{})
 	isDeleted, _ := c.IsDeleted(column)
 	deletedElements, _ := c.GetDeletedElements(column)
 	typedDeletedElements, _ := deletedElements.([]int16)
 	udtC := UDTChange{
+		AddedFields:   typedV,
 		RemovedFields: typedDeletedElements,
 		IsReset:       isDeleted,
 	}
 
-	if typedV != nil {
-		udtC.AddedFields = *typedV
-	}
 	return udtC
 }
 
@@ -607,7 +604,7 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 		} else if col.TypeInfo.Type() == gocql.TypeUDT {
 			v := ci.columnValues[pos].(*udtWithNulls)
 			if v != nil {
-				change.data[col.Name] = &v.fields
+				change.data[col.Name] = v.fields
 			}
 		} else {
 			v, notNull := maybeDereferenceTwice(ci.columnValues[pos])
@@ -648,7 +645,7 @@ type udtWithNulls struct {
 }
 
 func (uwn *udtWithNulls) UnmarshalUDT(name string, info gocql.TypeInfo, data []byte) error {
-	ptr := reflect.New(reflect.PtrTo(reflect.TypeOf(info.New()))).Interface()
+	ptr := reflect.New(reflect.TypeOf(info.New())).Interface()
 	if err := gocql.Unmarshal(info, data, ptr); err != nil {
 		return err
 	}

@@ -186,10 +186,6 @@ type DeltaReplicator struct {
 	columnTypes  map[string]TypeInfo
 	allColumns   []string
 
-	insertQueryStr          string
-	updateQueryStr          string
-	perColumnUpdateQueries  []updateQuerySet
-	udtInfos                []udtInfo
 	rowDeleteQueryStr       string
 	partitionDeleteQueryStr string
 	rangeDeleteQueryStrs    []string
@@ -242,127 +238,11 @@ func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, m
 		allColumns:   append(append(append([]string{}, otherColumns...), pkColumns...), ckColumns...),
 	}
 
-	dr.computeInsertQuery()
-	dr.computeUpdateQueries()
-	if err := dr.computeUDTQueries(kmeta); err != nil {
-		return nil, err
-	}
 	dr.computeRowDeleteQuery()
 	dr.computePartitionDeleteQuery()
 	dr.computeRangeDeleteQueries()
 
 	return dr, nil
-}
-
-func (r *DeltaReplicator) computeUpdateQueries() {
-	// Compute the regular update query
-	assignments := r.makeBindMarkerAssignments(r.otherColumns, ", ")
-
-	keyColumns := append(append([]string{}, r.pkColumns...), r.ckColumns...)
-	conditions := r.makeBindMarkerAssignments(keyColumns, " AND ")
-
-	r.updateQueryStr = fmt.Sprintf(
-		"UPDATE %s USING TTL ? SET %s WHERE %s",
-		r.tableName,
-		assignments,
-		conditions,
-	)
-
-	// Compute per-column update queries (only for non-frozen collections)
-	queries := make([]updateQuerySet, len(r.otherColumns))
-	for i, colName := range r.otherColumns {
-		typ := r.columnTypes[colName]
-		if typ.IsFrozen() {
-			continue
-		}
-
-		switch typ.Type() {
-		case TypeList:
-			queries[i].add = fmt.Sprintf(
-				"UPDATE %s USING TTL ? SET %s[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE %s",
-				r.tableName,
-				colName,
-				conditions,
-			)
-			queries[i].remove = fmt.Sprintf(
-				"UPDATE %s USING TTL ? AND TIMESTAMP ? SET %s = null WHERE %s",
-				r.tableName,
-				colName,
-				conditions,
-			)
-		case TypeMap, TypeSet:
-			queries[i].add = fmt.Sprintf(
-				"UPDATE %s USING TTL ? SET %s = %s + ? WHERE %s",
-				r.tableName,
-				colName, colName,
-				conditions,
-			)
-			queries[i].remove = fmt.Sprintf(
-				"UPDATE %s USING TTL ? SET %s = %s - ? WHERE %s",
-				r.tableName,
-				colName, colName,
-				conditions,
-			)
-		}
-	}
-
-	r.perColumnUpdateQueries = queries
-}
-
-func (r *DeltaReplicator) computeUDTQueries(kmeta *gocql.KeyspaceMetadata) error {
-	keyColumns := append(append([]string{}, r.pkColumns...), r.ckColumns...)
-	conditions := r.makeBindMarkerAssignments(keyColumns, " AND ")
-
-	queries := make([]udtInfo, len(r.otherColumns))
-	for i, colName := range r.otherColumns {
-		typ := r.columnTypes[colName]
-		if typ.IsFrozen() || typ.Type() != TypeUDT {
-			continue
-		}
-
-		name := typ.Unfrozen().(*UDTType).Name
-		typDesc, ok := kmeta.Types[name]
-		if !ok {
-			return fmt.Errorf("type %s does not exist in keyspace %s", name, kmeta.Name)
-		}
-
-		var assignments []string
-		// TODO: What about tuples?
-		for _, fieldName := range typDesc.FieldNames {
-			assignments = append(assignments, fmt.Sprintf("%s.%s = ?", colName, fieldName))
-		}
-
-		queries[i].setterQuery = fmt.Sprintf(
-			"UPDATE %s USING TTL ? SET %s WHERE %s",
-			r.tableName,
-			strings.Join(assignments, ", "),
-			conditions,
-		)
-		queries[i].fields = typDesc.FieldNames
-	}
-
-	r.udtInfos = queries
-	return nil
-}
-
-func (r *DeltaReplicator) computeInsertQuery() {
-	namesTuple := "(" + strings.Join(r.allColumns, ", ") + ")"
-
-	valueMarkers := []string{}
-	for _, colName := range r.otherColumns {
-		valueMarkers = append(valueMarkers, makeBindMarkerForType(r.columnTypes[colName]))
-	}
-	for i := 0; i < len(r.pkColumns)+len(r.ckColumns); i++ {
-		valueMarkers = append(valueMarkers, "?")
-	}
-	valueMarkersTuple := "(" + strings.Join(valueMarkers, ", ") + ")"
-
-	r.insertQueryStr = fmt.Sprintf(
-		"INSERT INTO %s %s VALUES %s USING TTL ?",
-		r.tableName,
-		namesTuple,
-		valueMarkersTuple,
-	)
 }
 
 func (r *DeltaReplicator) computeRowDeleteQuery() {
@@ -470,255 +350,272 @@ func (r *DeltaReplicator) processInsert(timestamp int64, c *scylla_cdc.ChangeRow
 }
 
 func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, c *scylla_cdc.ChangeRow) error {
-	overwriteVals := make([]interface{}, 0, len(r.allColumns)+1)
-
-	if !isInsert {
-		// In UPDATE, the TTL goes first
-		overwriteVals = append(overwriteVals, c.GetTTL())
-	}
-
 	batch := gocql.NewBatch(gocql.UnloggedBatch)
 
-	for i, colName := range r.otherColumns {
+	keyColumns := append(r.pkColumns, r.ckColumns...)
+
+	if isInsert {
+		// Insert row to make a row marker
+		// The rest of the columns will be set by using UPDATE queries
+		var bindMarkers []string
+		for _, columnName := range keyColumns {
+			bindMarkers = append(bindMarkers, makeBindMarkerForType(r.columnTypes[columnName]))
+		}
+
+		insertStr := fmt.Sprintf(
+			"INSERT INTO %s (%s) VALUES (%s) USING TTL ?",
+			r.tableName, strings.Join(keyColumns, ", "), strings.Join(bindMarkers, ", "),
+		)
+
+		var vals []interface{}
+		vals = appendKeyValuesToBind(vals, keyColumns, c)
+		vals = append(vals, c.GetTTL())
+		batch.Query(insertStr, vals...)
+	}
+
+	// Precompute the WHERE x = ? AND y = ? ... part
+	pkConditions := r.makeBindMarkerAssignments(keyColumns, " AND ")
+
+	for _, colName := range r.otherColumns {
 		typ := r.columnTypes[colName]
 		isNonFrozenCollection := !typ.IsFrozen() && typ.Type().IsCollection()
 
-		v, hasV := c.GetValue(colName)
-		isDeleted, _ := c.IsDeleted(colName)
-
 		if !isNonFrozenCollection {
-			if typ.Type() == TypeTuple {
-				tupleTyp := typ.Unfrozen().(*TupleType)
-				if hasV {
-					overwriteVals = append(overwriteVals, v.([]interface{})...)
-				} else {
-					for range tupleTyp.Elements {
-						if isDeleted {
-							overwriteVals = append(overwriteVals, nil)
-						} else {
-							overwriteVals = append(overwriteVals, gocql.UnsetValue)
-						}
-					}
+			scalarChange := c.GetScalarChange(colName)
+			if scalarChange.IsDeleted {
+				// Delete the value from the column
+				deleteStr := fmt.Sprintf(
+					"DELETE %s FROM %s WHERE %s",
+					colName, r.tableName, pkConditions,
+				)
+
+				var vals []interface{}
+				vals = appendKeyValuesToBind(vals, keyColumns, c)
+				batch.Query(deleteStr, vals...)
+			} else if scalarChange.Value != nil {
+				// The column was overwritten
+				updateStr := fmt.Sprintf(
+					"UPDATE %s USING TTL ? SET %s = %s WHERE %s",
+					r.tableName, colName, makeBindMarkerForType(typ), pkConditions,
+				)
+
+				var vals []interface{}
+				vals = append(vals, c.GetTTL())
+				vals = appendValueByType(vals, scalarChange.Value, typ)
+				vals = appendKeyValuesToBind(vals, keyColumns, c)
+				batch.Query(updateStr, vals...)
+			}
+		} else if typ.Type() == TypeList {
+			listChange := c.GetListChange(colName)
+			if listChange.IsReset {
+				// We can't just do UPDATE SET l = [...],
+				// because we need to precisely control timestamps
+				// of the list cells. This can be done only by
+				// UPDATE tbl SET l[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ?,
+				// which is equivalent to an append of one cell.
+				// Hence, the need for clear + append.
+				//
+				// We clear using a timestamp one-less-than the real
+				// timestamp of the write. This is what Cassandra/Scylla
+				// does internally, so it's OK to for us to do that.
+				deleteStr := fmt.Sprintf(
+					"DELETE %s FROM %s USING TIMESTAMP ? WHERE %s",
+					colName, r.tableName, pkConditions,
+				)
+
+				var vals []interface{}
+				vals = append(vals, timestamp-1)
+				vals = appendKeyValuesToBind(vals, keyColumns, c)
+				batch.Query(deleteStr, vals...)
+			}
+			if listChange.AppendedElements != nil {
+				// TODO: Explain
+				setStr := fmt.Sprintf(
+					"UPDATE %s USING TTL ? SET %s[SCYLLA_TIMEUUID_LIST_INDEX(?)] = %s WHERE %s",
+					r.tableName, colName, makeBindMarkerForType(typ), pkConditions,
+				)
+
+				rAppendedElements := reflect.ValueOf(listChange.AppendedElements)
+				r := rAppendedElements.MapRange()
+				for r.Next() {
+					k := r.Key().Interface()
+					v := r.Value().Interface()
+
+					var vals []interface{}
+					vals = append(vals, c.GetTTL())
+					vals = append(vals, k)
+					vals = appendValueByType(vals, v, typ)
+					vals = appendKeyValuesToBind(vals, keyColumns, c)
+					batch.Query(setStr, vals...)
 				}
+			}
+			if listChange.RemovedElements != nil {
+				// TODO: Explain
+				clearStr := fmt.Sprintf(
+					"UPDATE %s SET %s[SCYLLA_TIMEUUID_LIST_INDEX(?)] = null WHERE %s",
+					r.tableName, colName, pkConditions,
+				)
+
+				rRemovedElements := reflect.ValueOf(listChange.RemovedElements)
+				elsLen := rRemovedElements.Len()
+				for i := 0; i < elsLen; i++ {
+					k := rRemovedElements.Index(i).Interface()
+
+					var vals []interface{}
+					vals = append(vals, k)
+					vals = appendKeyValuesToBind(vals, keyColumns, c)
+					batch.Query(clearStr, vals...)
+				}
+			}
+		} else if typ.Type() == TypeSet || typ.Type() == TypeMap {
+			// TODO: Better comment
+			// Fortunately, both cases can be handled by the same code
+			// by using reflection. We are forced to use reflection anyway.
+			var (
+				added, removed interface{}
+				isReset        bool
+			)
+
+			if typ.Type() == TypeSet {
+				setChange := c.GetSetChange(colName)
+				added = setChange.AddedElements
+				removed = setChange.RemovedElements
+				isReset = setChange.IsReset
 			} else {
-				if isDeleted {
-					overwriteVals = append(overwriteVals, nil)
-				} else {
-					if hasV {
-						overwriteVals = append(overwriteVals, v)
-					} else {
-						overwriteVals = append(overwriteVals, gocql.UnsetValue)
-					}
-				}
+				mapChange := c.GetSetChange(colName)
+				added = mapChange.AddedElements
+				removed = mapChange.RemovedElements
+				isReset = mapChange.IsReset
 			}
-		} else {
-			pcuq := &r.perColumnUpdateQueries[i]
-			delEls, _ := c.GetDeletedElements(colName)
-			rDelEls := reflect.ValueOf(delEls)
-			delElsLen := rDelEls.Len()
-			if typ.Type() == TypeList {
-				overwriteVals = append(overwriteVals, gocql.UnsetValue)
-				if isDeleted {
-					// The list may be overwritten
-					// We realize it in two operations: clear + append
-					//
-					// We can't just do UPDATE SET l = [...],
-					// because we need to precisely control timestamps
-					// of the list cells. This can be done only by
-					// UPDATE SET l[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ?,
-					// which is equivalent to an append of one cell.
-					// Hence, the need for clear + append.
-					//
-					// We clear using a timestamp one-less-than the real
-					// timestamp of the write. This is what Cassandra/Scylla
-					// does internally, so it's OK to for us to do that.
 
-					clearVals := make([]interface{}, 2, len(r.pkColumns)+len(r.ckColumns)+2)
-					clearVals[0] = c.GetTTL()
-					clearVals[1] = timestamp
-					if hasV {
-						clearVals[1] = timestamp - 1
-					}
-					clearVals = appendKeyValuesToBind(clearVals, r.pkColumns, c)
-					clearVals = appendKeyValuesToBind(clearVals, r.ckColumns, c)
-					if debugQueries {
-						fmt.Println(pcuq.remove)
-						fmt.Println(clearVals...)
-					}
-					batch.Query(pcuq.remove, clearVals...)
-				}
-				if hasV {
-					// Append to the list
-					rv := reflect.ValueOf(v)
-					iter := rv.MapRange()
-					for iter.Next() {
-						key := iter.Key().Interface()
-						val := iter.Value().Interface()
+			if isReset {
+				// Overwrite the existing value
+				setStr := fmt.Sprintf(
+					"UPDATE %s USING TTL ? SET %s = ? WHERE %s",
+					r.tableName, colName, pkConditions,
+				)
 
-						setVals := make([]interface{}, 3, len(r.pkColumns)+len(r.ckColumns)+3)
-						setVals[0] = c.GetTTL()
-						setVals[1] = key
-						setVals[2] = val
-						setVals = appendKeyValuesToBind(setVals, r.pkColumns, c)
-						setVals = appendKeyValuesToBind(setVals, r.ckColumns, c)
-						if debugQueries {
-							fmt.Println(pcuq.add)
-							fmt.Println(setVals...)
-						}
-						batch.Query(pcuq.add, setVals...)
-					}
-				}
-				if delElsLen != 0 {
-					// Remove from the list
-					for i := 0; i < delElsLen; i++ {
-						setVals := make([]interface{}, 3, len(r.pkColumns)+len(r.ckColumns)+3)
-						setVals[0] = c.GetTTL()
-						setVals[1] = rDelEls.Index(i).Interface()
-						setVals[2] = nil
-						setVals = appendKeyValuesToBind(setVals, r.pkColumns, c)
-						setVals = appendKeyValuesToBind(setVals, r.ckColumns, c)
-						if debugQueries {
-							fmt.Println(pcuq.add)
-							fmt.Println(setVals...)
-						}
-						batch.Query(pcuq.add, setVals...)
-					}
-				}
-			} else if typ.Type() == TypeUDT {
-				// TODO
-				if hasV {
-					if isDeleted {
-						// The value of the UDT is being overwritten in full
-						overwriteVals = append(overwriteVals, v)
-					} else {
-						overwriteVals = append(overwriteVals, gocql.UnsetValue)
-
-						// Set some values, remove some values
-						info := &r.udtInfos[i]
-						udtVals := make([]interface{}, len(info.fields)+1, len(info.fields)+len(r.pkColumns)+len(r.ckColumns)+1)
-
-						// By default, don't change anything
-						for idx := range udtVals {
-							udtVals[idx] = gocql.UnsetValue
-						}
-
-						// Set values for keys for which values are non-null
-						pMap := v.(*map[string]interface{})
-						if pMap != nil {
-							vMap := *pMap
-							for i, name := range info.fields {
-								v, ok := vMap[name]
-								if ok && !reflect.ValueOf(v).IsNil() {
-									udtVals[i+1] = v
-								}
-							}
-						}
-
-						// Remove values for specified indexes
-						deletedElements, ok := c.GetDeletedElements(colName)
-						if ok {
-							deletedIndices := deletedElements.([]int16)
-							for _, idx := range deletedIndices {
-								udtVals[idx+1] = nil
-							}
-						}
-
-						udtVals[0] = c.GetTTL()
-						udtVals = appendKeyValuesToBind(udtVals, r.pkColumns, c)
-						udtVals = appendKeyValuesToBind(udtVals, r.ckColumns, c)
-						if debugQueries {
-							fmt.Println(info.setterQuery)
-							fmt.Println(udtVals...)
-						}
-						batch.Query(info.setterQuery, udtVals...)
-					}
-				} else if isDeleted {
-					// The value of the UDT is being cleared
-					overwriteVals = append(overwriteVals, nil)
-				}
+				var vals []interface{}
+				vals = append(vals, c.GetTTL())
+				vals = append(vals, added)
+				vals = appendKeyValuesToBind(vals, keyColumns, c)
+				batch.Query(setStr, vals...)
 			} else {
-				if hasV {
-					if isDeleted {
-						// The value of the collection is being overwritten
-						overwriteVals = append(overwriteVals, v)
-					} else {
-						// We are appending to the collection
-						addVals := make([]interface{}, 2, len(r.pkColumns)+len(r.ckColumns)+2)
-						addVals[0] = c.GetTTL()
-						addVals[1] = v
-						addVals = appendKeyValuesToBind(addVals, r.pkColumns, c)
-						addVals = appendKeyValuesToBind(addVals, r.ckColumns, c)
-						if debugQueries {
-							fmt.Println(pcuq.add)
-							fmt.Println(addVals...)
-						}
-						batch.Query(pcuq.add, addVals...)
-						overwriteVals = append(overwriteVals, gocql.UnsetValue)
-					}
-				} else if isDeleted {
-					// Collection is being reset to nil
-					overwriteVals = append(overwriteVals, nil)
-				} else {
-					overwriteVals = append(overwriteVals, gocql.UnsetValue)
+				if added != nil {
+					// Add elements
+					addStr := fmt.Sprintf(
+						"UPDATE %s USING TTL ? SET %s = %s + ? WHERE %s",
+						r.tableName, colName, colName, pkConditions,
+					)
+
+					var vals []interface{}
+					vals = append(vals, c.GetTTL())
+					vals = append(vals, added)
+					vals = appendKeyValuesToBind(vals, keyColumns, c)
+					batch.Query(addStr, vals...)
 				}
-				if delElsLen != 0 {
-					subVals := make([]interface{}, 2, len(r.pkColumns)+len(r.ckColumns)+2)
-					subVals[0] = c.GetTTL()
-					subVals[1] = rDelEls.Interface()
-					subVals = appendKeyValuesToBind(subVals, r.pkColumns, c)
-					subVals = appendKeyValuesToBind(subVals, r.ckColumns, c)
-					if debugQueries {
-						fmt.Println(pcuq.remove)
-						fmt.Println(subVals...)
-					}
-					batch.Query(pcuq.remove, subVals...)
+				if removed != nil {
+					// Removed elements
+					remStr := fmt.Sprintf(
+						"UPDATE %s USING TTL ? SET %s = %s - ? WHERE %s",
+						r.tableName, colName, colName, pkConditions,
+					)
+
+					var vals []interface{}
+					vals = append(vals, c.GetTTL())
+					vals = append(vals, removed)
+					vals = appendKeyValuesToBind(vals, keyColumns, c)
+					batch.Query(remStr, vals...)
 				}
 			}
-		}
-	}
+		} else if typ.Type() == TypeUDT {
+			udtChange := c.GetUDTChange(colName)
+			if udtChange.IsReset {
+				// The column was overwritten
+				updateStr := fmt.Sprintf(
+					"UPDATE %s USING TTL ? SET %s = %s WHERE %s",
+					r.tableName, colName, makeBindMarkerForType(typ), pkConditions,
+				)
 
-	var doRegularUpdate bool
+				var vals []interface{}
+				vals = append(vals, c.GetTTL())
+				vals = appendValueByType(vals, udtChange.AddedFields, typ)
+				vals = appendKeyValuesToBind(vals, keyColumns, c)
+				batch.Query(updateStr, vals...)
+			} else {
+				// Overwrite those columns which are non-null in AddedFields,
+				// and remove those which are listed in RemovedFields.
+				// In order to do this, we need to know the schema
+				// of the UDT.
 
-	if isInsert {
-		// In case of INSERT, we MUST perform the insert, even if only collections
-		// are updated. This is because INSERT, contrary to UPDATE, sets the
-		// row marker.
-		doRegularUpdate = true
-	} else {
-		for _, v := range overwriteVals {
-			if v != gocql.UnsetValue {
-				doRegularUpdate = true
-				break
+				// TODO: Optimize, this makes processing of the row quadratic
+				colInfos := c.Columns()
+				var udtInfo gocql.UDTTypeInfo
+				for _, colInfo := range colInfos {
+					if colInfo.Name == colName {
+						udtInfo = colInfo.TypeInfo.(gocql.UDTTypeInfo)
+						break
+					}
+				}
+
+				elementValues := make([]interface{}, len(udtInfo.Elements))
+
+				// Determine which elements to set, which to remove and which to ignore
+				for i := range elementValues {
+					elementValues[i] = gocql.UnsetValue
+				}
+				for i, el := range udtInfo.Elements {
+					v := udtChange.AddedFields[el.Name]
+					// TODO: Do we want to use pointers in maps?
+					if v != nil && !reflect.ValueOf(v).IsNil() {
+						elementValues[i] = v
+					}
+				}
+				for _, idx := range udtChange.RemovedFields {
+					elementValues[idx] = nil
+				}
+
+				// Send an individual query for each field that is being updated
+				for i, el := range udtInfo.Elements {
+					v := elementValues[i]
+					if v == gocql.UnsetValue {
+						continue
+					}
+
+					// fmt.Printf("    %#v\n", v)
+
+					bindValue := "null"
+					if v != nil {
+						// TODO: This should be "typ" for the UDT element
+						bindValue = makeBindMarkerForType(typ)
+					}
+
+					updateFieldStr := fmt.Sprintf(
+						"UPDATE %s USING TTL ? SET %s.%s = %s WHERE %s",
+						r.tableName, colName, el.Name, bindValue, pkConditions,
+					)
+
+					var vals []interface{}
+					vals = append(vals, c.GetTTL())
+					if v != nil {
+						vals = appendValueByType(vals, v, typ)
+					}
+					vals = appendKeyValuesToBind(vals, keyColumns, c)
+					batch.Query(updateFieldStr, vals...)
+				}
 			}
-		}
-	}
-
-	if doRegularUpdate {
-		overwriteVals = appendKeyValuesToBind(overwriteVals, r.pkColumns, c)
-		overwriteVals = appendKeyValuesToBind(overwriteVals, r.ckColumns, c)
-
-		if isInsert {
-			// In INSERT, the TTL goes at the end
-			overwriteVals = append(overwriteVals, c.GetTTL())
-		}
-
-		if isInsert {
-			if debugQueries {
-				fmt.Println(r.insertQueryStr)
-				fmt.Println(overwriteVals...)
-			}
-			batch.Query(r.insertQueryStr, overwriteVals...)
-		} else {
-			if debugQueries {
-				fmt.Println(r.updateQueryStr)
-				fmt.Println(overwriteVals...)
-			}
-			batch.Query(r.updateQueryStr, overwriteVals...)
 		}
 	}
 
 	batch.SetConsistency(r.consistency)
 	batch.WithTimestamp(timestamp)
+
+	if debugQueries {
+		for _, ent := range batch.Entries {
+			fmt.Println(ent.Stmt)
+			fmt.Println(ent.Args...)
+		}
+	}
 
 	err := r.session.ExecuteBatch(batch)
 	if err != nil {
@@ -891,10 +788,21 @@ func makeBindMarkerForType(typ TypeInfo) string {
 	}
 	tupleTyp := typ.Unfrozen().(*TupleType)
 	vals := make([]string, 0, len(tupleTyp.Elements))
-	for _, typ := range tupleTyp.Elements {
-		vals = append(vals, makeBindMarkerForType(typ))
+	for range tupleTyp.Elements {
+		// vals = append(vals, makeBindMarkerForType(typ))
+		vals = append(vals, "?")
 	}
 	return "(" + strings.Join(vals, ", ") + ")"
+}
+
+func appendValueByType(vals []interface{}, v interface{}, typ TypeInfo) []interface{} {
+	if typ.Type() == TypeTuple {
+		vTup := v.([]interface{})
+		vals = append(vals, vTup...)
+	} else {
+		vals = append(vals, v)
+	}
+	return vals
 }
 
 func appendKeyValuesToBind(
