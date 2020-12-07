@@ -378,8 +378,12 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 
 			default:
 				if !strings.HasPrefix(col.Name, "cdc$deleted_") {
-					// All non-cdc fields should be nullable
-					cval = reflect.New(reflect.TypeOf(col.TypeInfo.New())).Interface()
+					if col.TypeInfo.Type() == gocql.TypeUDT {
+						cval = new(udtWithNulls)
+					} else {
+						// All non-cdc fields should be nullable
+						cval = reflect.New(reflect.TypeOf(col.TypeInfo.New())).Interface()
+					}
 				} else {
 					cval = col.TypeInfo.New()
 				}
@@ -438,6 +442,11 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 				change.data[col.Name] = v
 			}
 			pos += tupLen
+		} else if col.TypeInfo.Type() == gocql.TypeUDT {
+			v := ci.columnValues[pos].(*udtWithNulls)
+			if v != nil {
+				change.data[col.Name] = &v.fields
+			}
 		} else {
 			v, notNull := maybeDereferenceTwice(ci.columnValues[pos])
 			if notNull {
@@ -466,4 +475,24 @@ func maybeDereferenceTwice(i interface{}) (interface{}, bool) {
 
 func timeuuidToTimestamp(from gocql.UUID) int64 {
 	return (from.Timestamp() - 0x01b21dd213814000) / 10
+}
+
+// A wrapper over map[string]interface{} which is used to deserialize UDTs.
+// Unlike raw map[string]interface{}, it keeps UDT fields as pointers,
+// not values, which allows to determine which values in the UDT are null.
+// Remember to pass an initialized map, nil map value won't be good
+type udtWithNulls struct {
+	fields map[string]interface{}
+}
+
+func (uwn *udtWithNulls) UnmarshalUDT(name string, info gocql.TypeInfo, data []byte) error {
+	ptr := reflect.New(reflect.PtrTo(reflect.TypeOf(info.New()))).Interface()
+	if err := gocql.Unmarshal(info, data, ptr); err != nil {
+		return err
+	}
+	if uwn.fields == nil {
+		uwn.fields = make(map[string]interface{})
+	}
+	uwn.fields[name] = reflect.Indirect(reflect.ValueOf(ptr)).Interface()
+	return nil
 }

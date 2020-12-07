@@ -249,32 +249,32 @@ var testCases = []struct {
 			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 2, null)",
 		},
 	},
-	{
-		schemaTuples,
-		"tupleUpdates",
-		[]string{
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 1, ('abc', 7))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 2, ('def', 9))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 3, ('ghi', 11))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 4, ('jkl', 13))",
-			"UPDATE %s SET v = ('zyx', 111) WHERE pk = 'tupleUpdates' AND ck = 1",
-			"UPDATE %s SET v = null WHERE pk = 'tupleUpdates' AND ck = 2",
-			"INSERT INTO %s (pk, ck) VALUES ('tupleUpdates', 3)",
-			"UPDATE %s SET v = (null, null) WHERE pk = 'tupleUpdates' AND ck = 4",
-			"UPDATE %s SET v = ('asdf', null) WHERE pk = 'tupleUpdates' AND ck = 5",
-			"UPDATE %s SET v = (null, 'wsad') WHERE pk = 'tupleUpdates' AND ck = 5",
-		},
-	},
-	{
-		schemaTuplesInTuples,
-		"tuplesInTuples",
-		[]string{
-			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 1, ((1, 'abc'), 7))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 2, ((3, 'def'), 9))",
-			"UPDATE %s SET v = ((100, 'zyx'), 111) WHERE pk = 'tuplesInTuples' AND ck = 1",
-			"UPDATE %s SET v = null WHERE pk = 'tuplesInTuples' AND ck = 2",
-		},
-	},
+	// {
+	// 	schemaTuples,
+	// 	"tupleUpdates",
+	// 	[]string{
+	// 		"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 1, ('abc', 7))",
+	// 		"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 2, ('def', 9))",
+	// 		"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 3, ('ghi', 11))",
+	// 		"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 4, ('jkl', 13))",
+	// 		"UPDATE %s SET v = ('zyx', 111) WHERE pk = 'tupleUpdates' AND ck = 1",
+	// 		"UPDATE %s SET v = null WHERE pk = 'tupleUpdates' AND ck = 2",
+	// 		"INSERT INTO %s (pk, ck) VALUES ('tupleUpdates', 3)",
+	// 		"UPDATE %s SET v = (null, null) WHERE pk = 'tupleUpdates' AND ck = 4",
+	// 		"UPDATE %s SET v = ('asdf', null) WHERE pk = 'tupleUpdates' AND ck = 5",
+	// 		"UPDATE %s SET v = (null, 'wsad') WHERE pk = 'tupleUpdates' AND ck = 5",
+	// 	},
+	// },
+	// {
+	// 	schemaTuplesInTuples,
+	// 	"tuplesInTuples",
+	// 	[]string{
+	// 		"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 1, ((1, 'abc'), 7))",
+	// 		"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 2, ((3, 'def'), 9))",
+	// 		"UPDATE %s SET v = ((100, 'zyx'), 111) WHERE pk = 'tuplesInTuples' AND ck = 1",
+	// 		"UPDATE %s SET v = null WHERE pk = 'tuplesInTuples' AND ck = 2",
+	// 	},
+	// },
 
 	// UDT test cases
 	{
@@ -288,7 +288,7 @@ var testCases = []struct {
 			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (333, 'jkl', 222))",
 			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 6, (432, 'mno', 678))",
 			"UPDATE %s SET v.b = 'qwe' WHERE pk = 'udt' AND ck = 2",
-			"UPDATE %s SET v = nil WHERE pk = 'udt' AND ck = 3",
+			"UPDATE %s SET v = null WHERE pk = 'udt' AND ck = 3",
 			"UPDATE %s SET v = {b: 'tyu', c: 123456} WHERE pk = 'udt' AND ck = 4",
 			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (999, 'zxc', 888))",
 			"UPDATE %s SET v.c = null WHERE pk = 'udt' AND ck = 6",

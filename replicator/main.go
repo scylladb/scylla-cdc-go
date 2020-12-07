@@ -313,7 +313,7 @@ func (r *DeltaReplicator) computeUDTQueries(kmeta *gocql.KeyspaceMetadata) error
 	keyColumns := append(append([]string{}, r.pkColumns...), r.ckColumns...)
 	conditions := r.makeBindMarkerAssignments(keyColumns, " AND ")
 
-	queries := make([]udtInfo, 0, len(r.otherColumns))
+	queries := make([]udtInfo, len(r.otherColumns))
 	for i, colName := range r.otherColumns {
 		typ := r.columnTypes[colName]
 		if typ.IsFrozen() || typ.Type() != TypeUDT {
@@ -591,21 +591,26 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 						// The value of the UDT is being overwritten in full
 						overwriteVals = append(overwriteVals, v)
 					} else {
+						overwriteVals = append(overwriteVals, gocql.UnsetValue)
+
 						// Set some values, remove some values
 						info := &r.udtInfos[i]
-						udtVals := make([]interface{}, len(info.fields)+len(r.pkColumns)+len(r.ckColumns)+1)
+						udtVals := make([]interface{}, len(info.fields)+1, len(info.fields)+len(r.pkColumns)+len(r.ckColumns)+1)
 
 						// By default, don't change anything
 						for idx := range udtVals {
-							udtVals[idx+1] = gocql.UnsetValue
+							udtVals[idx] = gocql.UnsetValue
 						}
 
 						// Set values for keys for which values are non-null
-						vMap := v.(map[string]interface{})
-						for i, name := range info.fields {
-							v, ok := vMap[name]
-							if ok && !reflect.ValueOf(v).IsNil() {
-								udtVals[i+1] = v
+						pMap := v.(*map[string]interface{})
+						if pMap != nil {
+							vMap := *pMap
+							for i, name := range info.fields {
+								v, ok := vMap[name]
+								if ok && !reflect.ValueOf(v).IsNil() {
+									udtVals[i+1] = v
+								}
 							}
 						}
 
@@ -627,6 +632,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 						}
 						batch.Query(info.setterQuery, udtVals...)
 					}
+				} else if isDeleted {
+					// The value of the UDT is being cleared
+					overwriteVals = append(overwriteVals, nil)
 				}
 			} else {
 				if hasV {
