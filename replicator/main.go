@@ -424,7 +424,11 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 				)
 
 				var vals []interface{}
-				vals = append(vals, timestamp-1)
+				clearTimestamp := timestamp
+				if listChange.AppendedElements != nil {
+					clearTimestamp--
+				}
+				vals = append(vals, clearTimestamp)
 				vals = appendKeyValuesToBind(vals, keyColumns, c)
 				batch.Query(deleteStr, vals...)
 			}
