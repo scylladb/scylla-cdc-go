@@ -607,6 +607,7 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 			if v != nil {
 				change.data[col.Name] = v.fields
 			}
+			pos++
 		} else {
 			v, notNull := maybeDereferenceTwice(ci.columnValues[pos])
 			if notNull {
