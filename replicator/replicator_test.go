@@ -56,6 +56,10 @@ var (
 		"ks.tbl_tuples_in_tuples",
 		"CREATE TABLE ks.tbl_tuples_in_tuples (pk text, ck int, v tuple<tuple<int, text>, int>, PRIMARY KEY (pk, ck))",
 	}
+	schemaTuplesInTuplesInTuples = schema{
+		"ks.tbl_tuples_in_tuples_in_tuples",
+		"CREATE TABLE ks.tbl_tuples_in_tuples_in_tuples (pk text, ck int, v tuple<tuple<tuple<int, int>, text>, int>, PRIMARY KEY (pk, ck))",
+	}
 	schemaUDTs = schema{
 		"ks.tbl_udts",
 		"CREATE TABLE ks.tbl_udts (pk text, ck int, v ks.udt_simple, PRIMARY KEY (pk, ck))",
@@ -273,6 +277,18 @@ var testCases = []struct {
 			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 2, ((3, 'def'), 9))",
 			"UPDATE %s SET v = ((100, 'zyx'), 111) WHERE pk = 'tuplesInTuples' AND ck = 1",
 			"UPDATE %s SET v = null WHERE pk = 'tuplesInTuples' AND ck = 2",
+		},
+	},
+	{
+		schemaTuplesInTuplesInTuples,
+		"tuplesInTuplesInTuples",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuplesInTuples', 1, (((1, 9), 'abc'), 7))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuplesInTuples', 2, (((3, 8), 'def'), 9))",
+			"UPDATE %s SET v = (((100, 200), 'zyx'), 111) WHERE pk = 'tuplesInTuplesInTuples' AND ck = 1",
+			"UPDATE %s SET v = null WHERE pk = 'tuplesInTuplesInTuples' AND ck = 2",
+			"UPDATE %s SET v = (null, 123) WHERE pk = 'tuplesInTuplesInTuples' AND ck = 3",
+			"UPDATE %s SET v = ((null, 'xyz'), 321) WHERE pk = 'tuplesInTuplesInTuples' AND ck = 4",
 		},
 	},
 

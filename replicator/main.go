@@ -738,17 +738,36 @@ func makeBindMarkerForType(typ TypeInfo) string {
 	}
 	tupleTyp := typ.Unfrozen().(*TupleType)
 	vals := make([]string, 0, len(tupleTyp.Elements))
-	for range tupleTyp.Elements {
-		// vals = append(vals, makeBindMarkerForType(typ))
-		vals = append(vals, "?")
+	for _, el := range tupleTyp.Elements {
+		vals = append(vals, makeBindMarkerForType(el))
 	}
 	return "(" + strings.Join(vals, ", ") + ")"
 }
 
 func appendValueByType(vals []interface{}, v interface{}, typ TypeInfo) []interface{} {
 	if typ.Type() == TypeTuple {
-		vTup := v.([]interface{})
-		vals = append(vals, vTup...)
+		tupTyp := typ.Unfrozen().(*TupleType)
+
+		var vTup []interface{}
+		switch v := v.(type) {
+		case []interface{}:
+			vTup = v
+		case *[]interface{}:
+			if v != nil {
+				vTup = *v
+			} else {
+				vTup = make([]interface{}, len(tupTyp.Elements))
+			}
+		case nil:
+			vTup = make([]interface{}, len(tupTyp.Elements))
+		default:
+			panic(fmt.Sprintf("unhandled tuple type: %t", v))
+		}
+
+		for i, vEl := range vTup {
+			elTyp := tupTyp.Elements[i]
+			vals = appendValueByType(vals, vEl, elTyp)
+		}
 	} else {
 		vals = append(vals, v)
 	}
@@ -762,6 +781,7 @@ func appendKeyValuesToBind(
 ) []interface{} {
 	// No need to handle non-frozen lists here, because they can't appear
 	// in either partition or clustering key
+	// TODO: Support tuples here, too
 	for _, name := range names {
 		v, ok := c.GetValue(name)
 		if !ok {

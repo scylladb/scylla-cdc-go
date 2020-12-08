@@ -596,8 +596,9 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 			tupIdx := ci.tupleNameToIdx[col.Name]
 			if ci.tupleWriteTimes[tupIdx] != 0 {
 				v := make([]interface{}, tupLen)
-				copy(v, ci.columnValues[pos:pos+tupLen])
-
+				for i := 0; i < tupLen; i++ {
+					v[i] = reflect.Indirect(reflect.ValueOf(ci.columnValues[pos+i])).Interface()
+				}
 				change.data[col.Name] = v
 			}
 			pos += tupLen
