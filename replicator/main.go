@@ -240,7 +240,6 @@ func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, m
 
 	dr.computeRowDeleteQuery()
 	dr.computePartitionDeleteQuery()
-	dr.computeRangeDeleteQueries()
 
 	return dr, nil
 }
@@ -261,37 +260,6 @@ func (r *DeltaReplicator) computePartitionDeleteQuery() {
 		r.tableName,
 		r.makeBindMarkerAssignments(r.pkColumns, " AND "),
 	)
-}
-
-func (r *DeltaReplicator) computeRangeDeleteQueries() {
-	r.rangeDeleteQueryStrs = make([]string, 0, 8*len(r.ckColumns))
-
-	prefix := fmt.Sprintf("DELETE FROM %s WHERE ", r.tableName)
-	eqConds := r.makeBindMarkerAssignmentList(r.pkColumns)
-
-	for _, ckCol := range r.ckColumns {
-		for typ := 0; typ < 8; typ++ {
-			startOp := [3]string{">=", ">", ""}[typ%3]
-			endOp := [3]string{"<=", "<", ""}[typ/3]
-			condsWithBounds := eqConds
-			if startOp != "" {
-				condsWithBounds = append(
-					condsWithBounds,
-					fmt.Sprintf("%s %s ?", ckCol, startOp),
-				)
-			}
-			if endOp != "" {
-				condsWithBounds = append(
-					condsWithBounds,
-					fmt.Sprintf("%s %s ?", ckCol, endOp),
-				)
-			}
-			queryStr := prefix + strings.Join(condsWithBounds, " AND ")
-			r.rangeDeleteQueryStrs = append(r.rangeDeleteQueryStrs, queryStr)
-		}
-
-		eqConds = append(eqConds, ckCol+" = ?")
-	}
 }
 
 func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
@@ -684,83 +652,61 @@ func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.
 
 func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla_cdc.ChangeRow) error {
 	// TODO: Cache vals?
-	vals := make([]interface{}, 0, len(r.pkColumns)+len(r.ckColumns)+1)
+	vals := make([]interface{}, 0)
 	vals = appendKeyValuesToBind(vals, r.pkColumns, start)
 
-	// Find the right query to use
-	var (
-		prevRight         interface{}
-		left, right       interface{}
-		hasLeft, hasRight bool
-		baseIdx           int = -1
-	)
+	conditions := r.makeBindMarkerAssignmentList(r.pkColumns)
 
-	// TODO: Explain what this loop does
-	for i, ckCol := range r.ckColumns {
-		left, hasLeft = start.GetValue(ckCol)
-		right, hasRight = end.GetValue(ckCol)
+	addConditions := func(c *scylla_cdc.ChangeRow, cmpOp string) {
+		ckNames := make([]string, 0)
+		markers := make([]string, 0)
+		for _, ckCol := range r.ckColumns {
 
-		if hasLeft {
-			if hasRight {
-				// Has both left and right
-				// It's either a delete bounded from two sides, or it's an
-				// equality condition
-				// If it's the last ck column or the next ck column will be null
-				// in both start and end, then it's an two-sided bound
-				// If not, it's an equality condition
-				prevRight = right
-				vals = append(vals, left)
-				continue
-			} else {
-				// Bounded from the left
-				vals = append(vals, left)
-				baseIdx = i
+			// Clustering key values are always atomic
+			ckVal, ok := c.GetValue(ckCol)
+			if !ok {
 				break
 			}
-		} else {
-			if hasRight {
-				// Bounded from the right
-				vals = append(vals, right)
-				baseIdx = i
-				break
-			} else {
-				// The previous column was a two-sided bound
-				// In previous iteration, we appended the left bound
-				// Append the right bound
-				vals = append(vals, prevRight)
-				hasLeft = true
-				hasRight = true
-				baseIdx = i - 1
-				break
-			}
+			ckNames = append(ckNames, ckCol)
+			vals = append(vals, ckVal)
+			markers = append(markers, makeBindMarkerForType(r.columnTypes[ckCol]))
+		}
+
+		if len(ckNames) > 0 {
+			conditions = append(conditions, fmt.Sprintf(
+				"(%s) %s (%s)",
+				strings.Join(ckNames, ", "),
+				cmpOp,
+				strings.Join(markers, ", "),
+			))
 		}
 	}
 
-	if baseIdx == -1 {
-		// It's a two-sided bound
-		vals = append(vals, prevRight)
-		baseIdx = len(r.ckColumns) - 1
+	if start.GetOperation() == scylla_cdc.RangeDeleteStartInclusive {
+		addConditions(start, ">=")
+	} else {
+		addConditions(start, ">")
 	}
 
-	// Magic... TODO: Make it more clear
-	leftOff := 2
-	if hasLeft {
-		leftOff = int(start.GetOperation() - scylla_cdc.RangeDeleteStartInclusive)
+	if end.GetOperation() == scylla_cdc.RangeDeleteEndInclusive {
+		addConditions(end, "<=")
+	} else {
+		addConditions(end, "<")
 	}
-	rightOff := 2
-	if hasRight {
-		rightOff = int(end.GetOperation() - scylla_cdc.RangeDeleteEndInclusive)
-	}
-	queryIdx := 8*baseIdx + leftOff + 3*rightOff
-	queryStr := r.rangeDeleteQueryStrs[queryIdx]
+
+	deleteStr := fmt.Sprintf(
+		"DELETE FROM %s WHERE %s",
+		r.tableName,
+		strings.Join(conditions, " AND "),
+	)
 
 	if debugQueries {
-		fmt.Println(queryStr)
+		fmt.Println(deleteStr)
 		fmt.Println(vals...)
 	}
 
 	err := r.session.
-		Query(queryStr, vals...).
+		Query(deleteStr, vals...).
 		Consistency(r.consistency).
 		Idempotent(true).
 		WithTimestamp(timestamp).

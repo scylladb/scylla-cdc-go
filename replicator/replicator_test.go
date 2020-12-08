@@ -262,7 +262,7 @@ var testCases = []struct {
 			"INSERT INTO %s (pk, ck) VALUES ('tupleUpdates', 3)",
 			"UPDATE %s SET v = (null, null) WHERE pk = 'tupleUpdates' AND ck = 4",
 			"UPDATE %s SET v = ('asdf', null) WHERE pk = 'tupleUpdates' AND ck = 5",
-			"UPDATE %s SET v = (null, 'wsad') WHERE pk = 'tupleUpdates' AND ck = 5",
+			"UPDATE %s SET v = (null, 123) WHERE pk = 'tupleUpdates' AND ck = 5",
 		},
 	},
 	{
