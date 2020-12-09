@@ -36,6 +36,10 @@ var (
 		"ks.tbl_multiple_clustering_keys",
 		"CREATE TABLE ks.tbl_multiple_clustering_keys (pk text, ck1 int, ck2 int, v int, PRIMARY KEY (pk, ck1, ck2))",
 	}
+	schemaBlobs = schema{
+		"ks.tbl_blobs",
+		"CREATE TABLE ks.tbl_blobs (pk text, ck int, v blob, PRIMARY KEY (pk, ck))",
+	}
 	schemaLists = schema{
 		"ks.tbl_lists",
 		"CREATE TABLE ks.tbl_lists (pk text, ck int, v list<int>, PRIMARY KEY(pk, ck))",
@@ -133,6 +137,21 @@ var testCases = []struct {
 			"DELETE FROM %s WHERE pk = 'rangeDeletes' AND ck1 > 3",
 			"DELETE FROM %s WHERE pk = 'rangeDeletes' AND ck1 <= 1",
 			"DELETE FROM %s WHERE pk = 'rangeDeletes' AND ck1 = 2 AND ck2 > 1 AND ck2 < 4",
+		},
+	},
+
+	// Blob test cases
+	{
+		schemaBlobs,
+		"blobs",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES ('blobs', 1, 0x1234)",
+			"INSERT INTO %s (pk, ck, v) VALUES ('blobs', 2, 0x)",
+			"INSERT INTO %s (pk, ck, v) VALUES ('blobs', 3, null)",
+			"INSERT INTO %s (pk, ck, v) VALUES ('blobs', 4, 0x4321)",
+			"INSERT INTO %s (pk, ck, v) VALUES ('blobs', 5, 0x00)",
+			"UPDATE %s SET v = null WHERE pk = 'blobs' AND ck = 4",
+			"UPDATE %s SET v = 0x WHERE pk = 'blobs' AND ck = 5",
 		},
 	},
 
@@ -303,11 +322,13 @@ var testCases = []struct {
 			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 4, (123, 'ghi', 321))",
 			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (333, 'jkl', 222))",
 			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 6, (432, 'mno', 678))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 7, (765, 'pqr', 345))",
 			"UPDATE %s SET v.b = 'qwe' WHERE pk = 'udt' AND ck = 2",
 			"UPDATE %s SET v = null WHERE pk = 'udt' AND ck = 3",
 			"UPDATE %s SET v = {b: 'tyu', c: 123456} WHERE pk = 'udt' AND ck = 4",
 			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (999, 'zxc', 888))",
 			"UPDATE %s SET v.c = null WHERE pk = 'udt' AND ck = 6",
+			"UPDATE %s SET v = {a: null, b: 'stu', c: 123456} WHERE pk = 'udt' AND ck = 7",
 		},
 	},
 }

@@ -597,7 +597,8 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 			if ci.tupleWriteTimes[tupIdx] != 0 {
 				v := make([]interface{}, tupLen)
 				for i := 0; i < tupLen; i++ {
-					v[i] = reflect.Indirect(reflect.ValueOf(ci.columnValues[pos+i])).Interface()
+					vv := reflect.Indirect(reflect.ValueOf(ci.columnValues[pos+i])).Interface()
+					v[i] = adjustBytes(vv)
 				}
 				change.data[col.Name] = v
 			}
@@ -606,12 +607,13 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 			v := ci.columnValues[pos].(*udtWithNulls)
 			if v != nil {
 				change.data[col.Name] = v.fields
+				v.fields = nil
 			}
 			pos++
 		} else {
 			v, notNull := maybeDereferenceTwice(ci.columnValues[pos])
 			if notNull {
-				change.data[col.Name] = v
+				change.data[col.Name] = adjustBytes(v)
 			}
 			pos++
 		}
@@ -654,6 +656,29 @@ func (uwn *udtWithNulls) UnmarshalUDT(name string, info gocql.TypeInfo, data []b
 	if uwn.fields == nil {
 		uwn.fields = make(map[string]interface{})
 	}
-	uwn.fields[name] = reflect.Indirect(reflect.ValueOf(ptr)).Interface()
+	vv := reflect.Indirect(reflect.ValueOf(ptr)).Interface()
+	uwn.fields[name] = adjustBytes(vv)
 	return nil
+}
+
+func adjustBytes(v interface{}) interface{} {
+	// Not sure why, but empty slices get deserialized as []byte(nil).
+	// We need to convert it to []byte{} (non-nil, empty slice).
+	// This is important because when used in a query,
+	// a nil empty slice is treated as null, whereas non-nil
+	// slice is treated as an empty slice, which are distinct
+	// in CQL.
+
+	switch vTyped := v.(type) {
+	case []byte:
+		if len(vTyped) == 0 {
+			v = make([]byte, 0)
+		}
+	case *[]byte:
+		if vTyped != nil && len(*vTyped) == 0 {
+			vv := make([]byte, 0)
+			v = &vv
+		}
+	}
+	return v
 }

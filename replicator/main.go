@@ -18,7 +18,8 @@ import (
 // TODO: Escape field names?
 // TODO: Tuple support
 
-var debugQueries = true
+var debugQueries = false
+var retryCount = 20
 
 func main() {
 	var (
@@ -48,12 +49,12 @@ func main() {
 	}
 
 	adv := scylla_cdc.AdvancedReaderConfig{
-		ConfidenceWindowSize:   0,
-		ChangeAgeLimit:         24 * time.Hour,
-		QueryTimeWindowSize:    24 * time.Hour,
-		PostEmptyQueryDelay:    15 * time.Second,
-		PostNonEmptyQueryDelay: 5 * time.Second,
-		PostFailedQueryDelay:   5 * time.Second,
+		ConfidenceWindowSize:   30 * time.Second,
+		ChangeAgeLimit:         5 * time.Minute,
+		QueryTimeWindowSize:    2 * time.Minute,
+		PostEmptyQueryDelay:    30 * time.Second,
+		PostNonEmptyQueryDelay: 10 * time.Second,
+		PostFailedQueryDelay:   1 * time.Second,
 	}
 
 	reader, err := MakeReplicator(
@@ -589,16 +590,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 		}
 	}
 
-	err := r.session.ExecuteBatch(batch)
-	if err != nil {
-		typ := "update"
-		if isInsert {
-			typ = "insert"
-		}
-		fmt.Printf("ERROR while trying to %s: %s\n", typ, err)
-	}
-
-	return err
+	return tryWithExponentialBackoff(func() error {
+		return r.session.ExecuteBatch(batch)
+	})
 }
 
 func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.ChangeRow) error {
@@ -612,18 +606,14 @@ func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.Change
 		fmt.Println(vals...)
 	}
 
-	// TODO: Propagate errors
-	err := r.session.
-		Query(r.rowDeleteQueryStr, vals...).
-		Consistency(r.consistency).
-		Idempotent(true).
-		WithTimestamp(timestamp).
-		Exec()
-	if err != nil {
-		fmt.Printf("ERROR while trying to delete row: %s\n", err)
-	}
-
-	return err
+	return tryWithExponentialBackoff(func() error {
+		return r.session.
+			Query(r.rowDeleteQueryStr, vals...).
+			Consistency(r.consistency).
+			Idempotent(true).
+			WithTimestamp(timestamp).
+			Exec()
+	})
 }
 
 func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.ChangeRow) error {
@@ -636,18 +626,14 @@ func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.
 		fmt.Println(vals...)
 	}
 
-	err := r.session.
-		Query(r.partitionDeleteQueryStr, vals...).
-		Consistency(r.consistency).
-		Idempotent(true).
-		WithTimestamp(timestamp).
-		Exec()
-	if err != nil {
-		fmt.Printf("ERROR while trying to delete partition: %s\n", err)
-	}
-
-	// TODO: Retries
-	return err
+	return tryWithExponentialBackoff(func() error {
+		return r.session.
+			Query(r.partitionDeleteQueryStr, vals...).
+			Consistency(r.consistency).
+			Idempotent(true).
+			WithTimestamp(timestamp).
+			Exec()
+	})
 }
 
 func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla_cdc.ChangeRow) error {
@@ -705,18 +691,14 @@ func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla
 		fmt.Println(vals...)
 	}
 
-	err := r.session.
-		Query(deleteStr, vals...).
-		Consistency(r.consistency).
-		Idempotent(true).
-		WithTimestamp(timestamp).
-		Exec()
-	if err != nil {
-		fmt.Printf("ERROR while trying to delete range: %s\n", err)
-	}
-
-	// TODO: Retries
-	return err
+	return tryWithExponentialBackoff(func() error {
+		return r.session.
+			Query(deleteStr, vals...).
+			Consistency(r.consistency).
+			Idempotent(true).
+			WithTimestamp(timestamp).
+			Exec()
+	})
 }
 
 func (r *DeltaReplicator) makeBindMarkerAssignmentList(columnNames []string) []string {
@@ -790,4 +772,25 @@ func appendKeyValuesToBind(
 		vals = append(vals, v)
 	}
 	return vals
+}
+
+func tryWithExponentialBackoff(f func() error) error {
+	dur := 50 * time.Millisecond
+	var err error
+	for i := 0; i < retryCount; i++ {
+		err = f()
+		if err == nil {
+			return nil
+		}
+
+		fmt.Printf("ERROR (%d/%d): %s\n", i+1, retryCount, err)
+
+		<-time.After(dur)
+		dur *= 2
+		if dur > time.Second {
+			dur = time.Second
+		}
+	}
+
+	return err
 }
