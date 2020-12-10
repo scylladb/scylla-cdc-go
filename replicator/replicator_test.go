@@ -24,7 +24,7 @@ type schema struct {
 }
 
 var udts = []string{
-	"CREATE TYPE ks.udt_simple (a int, b text, c int)",
+	"CREATE TYPE ks.udt_simple (a int, b int, c text)",
 }
 
 var (
@@ -54,7 +54,7 @@ var (
 	}
 	schemaTuples = schema{
 		"ks.tbl_tuples",
-		"CREATE TABLE ks.tbl_tuples (pk text, ck int, v tuple<text, int>, PRIMARY KEY (pk, ck))",
+		"CREATE TABLE ks.tbl_tuples (pk text, ck int, v tuple<int, text>, PRIMARY KEY (pk, ck))",
 	}
 	schemaTuplesInTuples = schema{
 		"ks.tbl_tuples_in_tuples",
@@ -267,8 +267,8 @@ var testCases = []struct {
 		schemaTuples,
 		"tupleInserts",
 		[]string{
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 1, ('abc', 7))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 2, ('def', 9))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 1, (7, 'abc'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 2, (9, 'def'))",
 			"INSERT INTO %s (pk, ck, v) VALUES ('tupleInserts', 2, null)",
 		},
 	},
@@ -276,16 +276,20 @@ var testCases = []struct {
 		schemaTuples,
 		"tupleUpdates",
 		[]string{
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 1, ('abc', 7))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 2, ('def', 9))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 3, ('ghi', 11))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 4, ('jkl', 13))",
-			"UPDATE %s SET v = ('zyx', 111) WHERE pk = 'tupleUpdates' AND ck = 1",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 1, (7, 'abc'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 2, (9, 'def'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 3, (11, 'ghi'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 4, (13, 'jkl'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 5, (15, 'mno'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 6, (17, 'pqr'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tupleUpdates', 7, (19, 'stu'))",
+			"UPDATE %s SET v = (111, 'zyx') WHERE pk = 'tupleUpdates' AND ck = 1",
 			"UPDATE %s SET v = null WHERE pk = 'tupleUpdates' AND ck = 2",
 			"INSERT INTO %s (pk, ck) VALUES ('tupleUpdates', 3)",
 			"UPDATE %s SET v = (null, null) WHERE pk = 'tupleUpdates' AND ck = 4",
-			"UPDATE %s SET v = ('asdf', null) WHERE pk = 'tupleUpdates' AND ck = 5",
-			"UPDATE %s SET v = (null, 123) WHERE pk = 'tupleUpdates' AND ck = 5",
+			"UPDATE %s SET v = (null, 'asdf') WHERE pk = 'tupleUpdates' AND ck = 5",
+			"UPDATE %s SET v = (123, null) WHERE pk = 'tupleUpdates' AND ck = 6",
+			"UPDATE %s SET v = (null, '') WHERE pk = 'tupleUpdates' AND ck = 7",
 		},
 	},
 	{
@@ -294,8 +298,12 @@ var testCases = []struct {
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 1, ((1, 'abc'), 7))",
 			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 2, ((3, 'def'), 9))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 3, ((3, 'ghi'), 9))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('tuplesInTuples', 4, ((3, 'jkl'), 9))",
 			"UPDATE %s SET v = ((100, 'zyx'), 111) WHERE pk = 'tuplesInTuples' AND ck = 1",
 			"UPDATE %s SET v = null WHERE pk = 'tuplesInTuples' AND ck = 2",
+			"UPDATE %s SET v = ((200, null), 999) WHERE pk = 'tuplesInTuples' AND ck = 3",
+			"UPDATE %s SET v = ((300, ''), 333) WHERE pk = 'tuplesInTuples' AND ck = 4",
 		},
 	},
 	{
@@ -316,19 +324,19 @@ var testCases = []struct {
 		schemaUDTs,
 		"udt",
 		[]string{
-			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 1, (2, 'abc', 3))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 2, {a: 6, c: 7})",
-			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 3, (9, 'def', 4))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 4, (123, 'ghi', 321))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (333, 'jkl', 222))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 6, (432, 'mno', 678))",
-			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 7, (765, 'pqr', 345))",
-			"UPDATE %s SET v.b = 'qwe' WHERE pk = 'udt' AND ck = 2",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 1, (2, 3, 'abc'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 2, {a: 6, c: 'zxcv'})",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 3, (9, 4, 'def'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 4, (123, 321, 'ghi'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (333, 222, 'jkl'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 6, (432, 678, 'mno'))",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 7, (765, 345, 'pqr'))",
+			"UPDATE %s SET v.b = 41414 WHERE pk = 'udt' AND ck = 2",
 			"UPDATE %s SET v = null WHERE pk = 'udt' AND ck = 3",
-			"UPDATE %s SET v = {b: 'tyu', c: 123456} WHERE pk = 'udt' AND ck = 4",
-			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (999, 'zxc', 888))",
+			"UPDATE %s SET v = {b: 123456, c: 'tyu'} WHERE pk = 'udt' AND ck = 4",
+			"INSERT INTO %s (pk, ck, v) VALUES ('udt', 5, (999, 888, 'zxc'))",
 			"UPDATE %s SET v.c = null WHERE pk = 'udt' AND ck = 6",
-			"UPDATE %s SET v = {a: null, b: 'stu', c: 123456} WHERE pk = 'udt' AND ck = 7",
+			"UPDATE %s SET v = {a: 923, b: 123456, c: ''} WHERE pk = 'udt' AND ck = 7",
 		},
 	},
 }
