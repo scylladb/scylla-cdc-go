@@ -20,6 +20,7 @@ import (
 
 var debugQueries = false
 var retryCount = 20
+var maxWaitBetweenRetries = 5 * time.Second
 
 func main() {
 	var (
@@ -783,12 +784,12 @@ func tryWithExponentialBackoff(f func() error) error {
 			return nil
 		}
 
-		fmt.Printf("ERROR (%d/%d): %s\n", i+1, retryCount, err)
+		log.Printf("ERROR (%d/%d): %s", i+1, retryCount, err)
 
 		<-time.After(dur)
 		dur *= 2
-		if dur > time.Second {
-			dur = time.Second
+		if dur > maxWaitBetweenRetries {
+			dur = maxWaitBetweenRetries
 		}
 	}
 

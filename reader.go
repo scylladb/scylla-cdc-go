@@ -156,7 +156,7 @@ func (r *Reader) Run(ctx context.Context) error {
 		}
 
 		for {
-			l.Printf("starting reading from generation %v", r.readFrom)
+			l.Printf("starting reading generation %v from timestamp %v", gen.startTime, r.readFrom)
 
 			// Start batch readers for this generation
 			split, err := r.splitStreams(gen.streams)
