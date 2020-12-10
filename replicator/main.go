@@ -320,7 +320,21 @@ func (r *DeltaReplicator) processInsert(timestamp int64, c *scylla_cdc.ChangeRow
 }
 
 func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, c *scylla_cdc.ChangeRow) error {
-	batch := gocql.NewBatch(gocql.UnloggedBatch)
+	runQuery := func(q string, vals []interface{}) error {
+		if debugQueries {
+			fmt.Println(q)
+			fmt.Println(vals...)
+		}
+
+		return tryWithExponentialBackoff(func() error {
+			return r.session.
+				Query(q, vals...).
+				Consistency(r.consistency).
+				Idempotent(true).
+				WithTimestamp(timestamp).
+				Exec()
+		})
+	}
 
 	keyColumns := append(r.pkColumns, r.ckColumns...)
 
@@ -340,7 +354,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 		var vals []interface{}
 		vals = appendKeyValuesToBind(vals, keyColumns, c)
 		vals = append(vals, c.GetTTL())
-		batch.Query(insertStr, vals...)
+		if err := runQuery(insertStr, vals); err != nil {
+			return err
+		}
 	}
 
 	// Precompute the WHERE x = ? AND y = ? ... part
@@ -361,7 +377,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 
 				var vals []interface{}
 				vals = appendKeyValuesToBind(vals, keyColumns, c)
-				batch.Query(deleteStr, vals...)
+				if err := runQuery(deleteStr, vals); err != nil {
+					return err
+				}
 			} else if scalarChange.Value != nil {
 				// The column was overwritten
 				updateStr := fmt.Sprintf(
@@ -373,7 +391,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 				vals = append(vals, c.GetTTL())
 				vals = appendValueByType(vals, scalarChange.Value, typ)
 				vals = appendKeyValuesToBind(vals, keyColumns, c)
-				batch.Query(updateStr, vals...)
+				if err := runQuery(updateStr, vals); err != nil {
+					return err
+				}
 			}
 		} else if typ.Type() == TypeList {
 			listChange := c.GetListChange(colName)
@@ -400,7 +420,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 				}
 				vals = append(vals, clearTimestamp)
 				vals = appendKeyValuesToBind(vals, keyColumns, c)
-				batch.Query(deleteStr, vals...)
+				if err := runQuery(deleteStr, vals); err != nil {
+					return err
+				}
 			}
 			if listChange.AppendedElements != nil {
 				// TODO: Explain
@@ -420,7 +442,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 					vals = append(vals, k)
 					vals = appendValueByType(vals, v, typ)
 					vals = appendKeyValuesToBind(vals, keyColumns, c)
-					batch.Query(setStr, vals...)
+					if err := runQuery(setStr, vals); err != nil {
+						return err
+					}
 				}
 			}
 			if listChange.RemovedElements != nil {
@@ -438,7 +462,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 					var vals []interface{}
 					vals = append(vals, k)
 					vals = appendKeyValuesToBind(vals, keyColumns, c)
-					batch.Query(clearStr, vals...)
+					if err := runQuery(clearStr, vals); err != nil {
+						return err
+					}
 				}
 			}
 		} else if typ.Type() == TypeSet || typ.Type() == TypeMap {
@@ -473,7 +499,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 				vals = append(vals, c.GetTTL())
 				vals = append(vals, added)
 				vals = appendKeyValuesToBind(vals, keyColumns, c)
-				batch.Query(setStr, vals...)
+				if err := runQuery(setStr, vals); err != nil {
+					return err
+				}
 			} else {
 				if added != nil {
 					// Add elements
@@ -486,7 +514,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 					vals = append(vals, c.GetTTL())
 					vals = append(vals, added)
 					vals = appendKeyValuesToBind(vals, keyColumns, c)
-					batch.Query(addStr, vals...)
+					if err := runQuery(addStr, vals); err != nil {
+						return err
+					}
 				}
 				if removed != nil {
 					// Removed elements
@@ -499,7 +529,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 					vals = append(vals, c.GetTTL())
 					vals = append(vals, removed)
 					vals = appendKeyValuesToBind(vals, keyColumns, c)
-					batch.Query(remStr, vals...)
+					if err := runQuery(remStr, vals); err != nil {
+						return err
+					}
 				}
 			}
 		} else if typ.Type() == TypeUDT {
@@ -515,7 +547,9 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 				vals = append(vals, c.GetTTL())
 				vals = appendValueByType(vals, udtChange.AddedFields, typ)
 				vals = appendKeyValuesToBind(vals, keyColumns, c)
-				batch.Query(updateStr, vals...)
+				if err := runQuery(updateStr, vals); err != nil {
+					return err
+				}
 			} else {
 				// Overwrite those columns which are non-null in AddedFields,
 				// and remove those which are listed in RemovedFields.
@@ -575,25 +609,15 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 						vals = appendValueByType(vals, v, typ)
 					}
 					vals = appendKeyValuesToBind(vals, keyColumns, c)
-					batch.Query(updateFieldStr, vals...)
+					if err := runQuery(updateFieldStr, vals); err != nil {
+						return err
+					}
 				}
 			}
 		}
 	}
 
-	batch.SetConsistency(r.consistency)
-	batch.WithTimestamp(timestamp)
-
-	if debugQueries {
-		for _, ent := range batch.Entries {
-			fmt.Println(ent.Stmt)
-			fmt.Println(ent.Args...)
-		}
-	}
-
-	return tryWithExponentialBackoff(func() error {
-		return r.session.ExecuteBatch(batch)
-	})
+	return nil
 }
 
 func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.ChangeRow) error {
