@@ -73,7 +73,7 @@ outer:
 
 		readUpTo := pollEnd
 
-		if CompareTimeuuid(sbr.lastTimestamp, pollEnd) < 0 {
+		if compareTimeuuid(sbr.lastTimestamp, pollEnd) < 0 {
 			// Set the time interval from which we need to return data
 			var iter *changeRowIterator
 			iter, err = crq.queryRange(sbr.lastTimestamp, pollEnd)
@@ -109,7 +109,7 @@ outer:
 						change.Postimage = nil
 
 						// Update the last timestamp only after we processed whole batch
-						if CompareTimeuuid(sbr.lastTimestamp, streamCols.time) < 0 {
+						if compareTimeuuid(sbr.lastTimestamp, streamCols.time) < 0 {
 							sbr.lastTimestamp = streamCols.time
 						}
 					}
@@ -164,7 +164,7 @@ outer:
 
 func (sbr *streamBatchReader) reachedEndOfTheGeneration(windowEnd gocql.UUID) bool {
 	end, isClosed := sbr.endTimestamp.Load().(gocql.UUID)
-	return isClosed && (end == gocql.UUID{} || CompareTimeuuid(end, windowEnd) <= 0)
+	return isClosed && (end == gocql.UUID{} || compareTimeuuid(end, windowEnd) <= 0)
 }
 
 // Only one of `close`, `stopNow` methods should be called, only once

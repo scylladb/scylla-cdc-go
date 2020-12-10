@@ -7,7 +7,7 @@ import (
 	"github.com/gocql/gocql"
 )
 
-func CompareTimeuuid(u1 gocql.UUID, u2 gocql.UUID) int {
+func compareTimeuuid(u1 gocql.UUID, u2 gocql.UUID) int {
 	// Compare timestamps
 	t1 := u1.Timestamp()
 	t2 := u2.Timestamp()
@@ -30,7 +30,7 @@ func CompareTimeuuid(u1 gocql.UUID, u2 gocql.UUID) int {
 
 var validIDPattern = regexp.MustCompile("^[a-zA-Z][a-zA-Z0-9_]*$")
 
-func EscapeColumnNameIfNeeded(s string) string {
+func escapeColumnNameIfNeeded(s string) string {
 	if shouldEscape(s) {
 		return escapeColumnName(s)
 	}
