@@ -387,7 +387,7 @@ func TestReplicator(t *testing.T) {
 		schemaNames = append(schemaNames, tbl)
 	}
 
-	replicator, err := MakeReplicator(sourceAddress, destinationAddress, schemaNames, &adv, gocql.Quorum)
+	replicator, _, err := MakeReplicator(sourceAddress, destinationAddress, schemaNames, &adv, gocql.Quorum)
 	if err != nil {
 		t.Fatal(err)
 	}

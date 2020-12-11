@@ -267,6 +267,7 @@ func TestTypes(t *testing.T) {
 	cfg := NewReaderConfig(
 		session,
 		factory,
+		&NoProgressManager{},
 		tableNames...,
 	)
 	cfg.Advanced = adv

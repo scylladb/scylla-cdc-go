@@ -41,6 +41,7 @@ func main() {
 	cfg := scylla_cdc.NewReaderConfig(
 		session,
 		scylla_cdc.MakeChangeConsumerFactoryFromFunc(printerConsumer),
+		&scylla_cdc.NoProgressManager{},
 		keyspace+"."+table,
 	)
 	cfg.ClusterStateTracker = tracker

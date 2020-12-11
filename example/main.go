@@ -35,6 +35,7 @@ func main() {
 		TableNames:            []string{"ks.tbl"},
 		ChangeConsumerFactory: scylla_cdc.MakeChangeConsumerFactoryFromFunc(simpleConsumer),
 		ClusterStateTracker:   tracker,
+		ProgressManager:       &scylla_cdc.NoProgressManager{},
 
 		Logger: log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
 	}

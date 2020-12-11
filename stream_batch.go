@@ -2,6 +2,7 @@ package scylla_cdc
 
 import (
 	"context"
+	"encoding/base64"
 	"sync/atomic"
 	"time"
 
@@ -9,10 +10,11 @@ import (
 )
 
 type streamBatchReader struct {
-	config       *ReaderConfig
-	streams      []StreamID
-	keyspaceName string
-	tableName    string
+	config         *ReaderConfig
+	generationTime time.Time
+	streams        []StreamID
+	keyspaceName   string
+	tableName      string
 
 	lastTimestamp gocql.UUID
 	endTimestamp  atomic.Value
@@ -22,16 +24,18 @@ type streamBatchReader struct {
 
 func newStreamBatchReader(
 	config *ReaderConfig,
+	generationTime time.Time,
 	streams []StreamID,
 	keyspaceName string,
 	tableName string,
 	startFrom gocql.UUID,
 ) *streamBatchReader {
 	return &streamBatchReader{
-		config:       config,
-		streams:      streams,
-		keyspaceName: keyspaceName,
-		tableName:    tableName,
+		config:         config,
+		generationTime: generationTime,
+		streams:        streams,
+		keyspaceName:   keyspaceName,
+		tableName:      tableName,
 
 		lastTimestamp: startFrom,
 
@@ -39,8 +43,29 @@ func newStreamBatchReader(
 	}
 }
 
-func (sbr *streamBatchReader) run(ctx context.Context) (gocql.UUID, error) {
+func (sbr *streamBatchReader) run(ctx context.Context) error {
 	baseTableName := sbr.keyspaceName + "." + sbr.tableName
+
+	oldProgress := make(map[string]gocql.UUID, len(sbr.streams))
+	for _, stream := range sbr.streams {
+		progress, err := sbr.config.ProgressManager.GetProgress(sbr.generationTime, baseTableName, stream)
+		if err != nil {
+			return err
+		}
+		oldProgress[string(stream)] = progress.Time
+	}
+
+	minTime := oldProgress[string(sbr.streams[0])]
+	for _, progress := range oldProgress {
+		if compareTimeuuid(minTime, progress) > 0 {
+			minTime = progress
+		}
+	}
+	if (minTime != gocql.UUID{}) {
+		sbr.lastTimestamp = minTime
+	}
+
+	sbr.config.Logger.Printf("running batch starting from %v", sbr.lastTimestamp.Time())
 
 	input := CreateChangeConsumerInput{
 		TableName: baseTableName,
@@ -49,8 +74,9 @@ func (sbr *streamBatchReader) run(ctx context.Context) (gocql.UUID, error) {
 	consumer, err := sbr.config.ChangeConsumerFactory.CreateChangeConsumer(input)
 	if err != nil {
 		sbr.config.Logger.Printf("error while creating change consumer (will quit): %s", err)
+	} else {
+		defer consumer.End()
 	}
-	defer consumer.End()
 
 	crq := newChangeRowQuerier(sbr.config.Session, sbr.streams, sbr.keyspaceName, sbr.tableName)
 
@@ -96,12 +122,18 @@ outer:
 					}
 
 					if c.cdcCols.endOfBatch {
-						change.StreamID = streamCols.streamID
-						change.Time = streamCols.time
-						if err := consumer.Consume(change); err != nil {
-							// TODO: Does that make sense?
-							sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
-							return sbr.lastTimestamp, err
+						// Prevent changes older than the save point from being replayed again
+						if compareTimeuuid(oldProgress[string(change.StreamID)], streamCols.time) < 0 {
+							change.StreamID = streamCols.streamID
+							change.Time = streamCols.time
+							if err := consumer.Consume(change); err != nil {
+								// TODO: Does that make sense?
+								sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
+								return err
+							}
+						} else {
+							sbr.config.Logger.Printf("skipping change due to it being too old (%v <= %v)",
+								streamCols.streamID, oldProgress[string(change.StreamID)].Time())
 						}
 
 						change.Preimage = nil
@@ -147,7 +179,7 @@ outer:
 		for {
 			select {
 			case <-ctx.Done():
-				return sbr.lastTimestamp, ctx.Err()
+				return ctx.Err()
 			case <-time.After(delayUntil.Sub(time.Now())):
 				break delay
 			case <-sbr.interruptCh:
@@ -156,10 +188,19 @@ outer:
 				}
 			}
 		}
-
 	}
+
+	for _, stream := range sbr.streams {
+		if err := sbr.config.ProgressManager.SaveProgress(sbr.generationTime, baseTableName, stream, Progress{sbr.lastTimestamp}); err != nil {
+			// TODO: Should this be a hard error?
+			sbr.config.Logger.Printf("error while trying to save progress for table %s, stream %v: %s", baseTableName, stream, err)
+		} else {
+			sbr.config.Logger.Printf("saved progress for stream %s at %v", base64.StdEncoding.EncodeToString(stream), sbr.lastTimestamp.Time())
+		}
+	}
+
 	// sbr.config.Logger.Printf("successfully finishing stream processor loop for %v", sbr.streams)
-	return sbr.lastTimestamp, nil
+	return nil
 }
 
 func (sbr *streamBatchReader) reachedEndOfTheGeneration(windowEnd gocql.UUID) bool {

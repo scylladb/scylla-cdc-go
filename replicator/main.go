@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -18,6 +19,7 @@ import (
 // TODO: Escape field names?
 // TODO: Tuple support
 
+var showTimestamps = true
 var debugQueries = false
 var retryCount = 20
 var maxWaitBetweenRetries = 5 * time.Second
@@ -51,14 +53,14 @@ func main() {
 
 	adv := scylla_cdc.AdvancedReaderConfig{
 		ConfidenceWindowSize:   30 * time.Second,
-		ChangeAgeLimit:         5 * time.Minute,
-		QueryTimeWindowSize:    2 * time.Minute,
+		ChangeAgeLimit:         24 * time.Hour,
+		QueryTimeWindowSize:    24 * time.Hour,
 		PostEmptyQueryDelay:    30 * time.Second,
 		PostNonEmptyQueryDelay: 10 * time.Second,
 		PostFailedQueryDelay:   1 * time.Second,
 	}
 
-	reader, err := MakeReplicator(
+	reader, rowsRead, err := MakeReplicator(
 		source, destination,
 		[]string{keyspace + "." + table},
 		&adv,
@@ -96,7 +98,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Println("quitting")
+	log.Printf("quitting, rows read: %d", *rowsRead)
 }
 
 func MakeReplicator(
@@ -104,12 +106,12 @@ func MakeReplicator(
 	tableNames []string,
 	advancedParams *scylla_cdc.AdvancedReaderConfig,
 	consistency gocql.Consistency,
-) (*scylla_cdc.Reader, error) {
+) (*scylla_cdc.Reader, *int64, error) {
 	// Configure a session for the destination cluster
 	destinationCluster := gocql.NewCluster(destination)
 	destinationSession, err := destinationCluster.CreateSession()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	tracker := scylla_cdc.NewClusterStateTracker(gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy()))
@@ -120,18 +122,28 @@ func MakeReplicator(
 	session, err := cluster.CreateSession()
 	if err != nil {
 		destinationSession.Close()
-		return nil, err
+		return nil, nil, err
 	}
+
+	progressManager, err := scylla_cdc.NewTableBackedProgressManager(session, "ks.cdc_go_replicator_progress")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rowsRead := new(int64)
 
 	factory := &replicatorFactory{
 		destinationSession: destinationSession,
 		consistency:        consistency,
+
+		rowsRead: rowsRead,
 	}
 
 	// Configuration for the CDC reader
 	cfg := scylla_cdc.NewReaderConfig(
 		session,
 		factory,
+		progressManager,
 		tableNames...,
 	)
 	if advancedParams != nil {
@@ -145,16 +157,18 @@ func MakeReplicator(
 	if err != nil {
 		session.Close()
 		destinationSession.Close()
-		return nil, err
+		return nil, nil, err
 	}
 
 	// TODO: source and destination sessions are leaking
-	return reader, nil
+	return reader, rowsRead, nil
 }
 
 type replicatorFactory struct {
 	destinationSession *gocql.Session
 	consistency        gocql.Consistency
+
+	rowsRead *int64
 }
 
 func (rf *replicatorFactory) CreateChangeConsumer(input scylla_cdc.CreateChangeConsumerInput) (scylla_cdc.ChangeConsumer, error) {
@@ -174,7 +188,7 @@ func (rf *replicatorFactory) CreateChangeConsumer(input scylla_cdc.CreateChangeC
 		return nil, fmt.Errorf("table %s does not exist", input.TableName)
 	}
 
-	return NewDeltaReplicator(rf.destinationSession, kmeta, tmeta, rf.consistency)
+	return NewDeltaReplicator(rf.destinationSession, kmeta, tmeta, rf.consistency, rf.rowsRead)
 }
 
 type DeltaReplicator struct {
@@ -191,6 +205,9 @@ type DeltaReplicator struct {
 	rowDeleteQueryStr       string
 	partitionDeleteQueryStr string
 	rangeDeleteQueryStrs    []string
+
+	localCount int64
+	totalCount *int64
 }
 
 type updateQuerySet struct {
@@ -203,7 +220,7 @@ type udtInfo struct {
 	fields      []string
 }
 
-func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, meta *gocql.TableMetadata, consistency gocql.Consistency) (*DeltaReplicator, error) {
+func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, meta *gocql.TableMetadata, consistency gocql.Consistency, count *int64) (*DeltaReplicator, error) {
 	var (
 		pkColumns    []string
 		ckColumns    []string
@@ -238,6 +255,8 @@ func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, m
 		otherColumns: otherColumns,
 		columnTypes:  columnTypes,
 		allColumns:   append(append(append([]string{}, otherColumns...), pkColumns...), ckColumns...),
+
+		totalCount: count,
 	}
 
 	dr.computeRowDeleteQuery()
@@ -267,6 +286,10 @@ func (r *DeltaReplicator) computePartitionDeleteQuery() {
 func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
 	timestamp := c.GetCassandraTimestamp()
 	pos := 0
+
+	if showTimestamps {
+		log.Printf("Processing timestamp: %v\n", c.Time)
+	}
 
 	for pos < len(c.Delta) {
 		change := c.Delta[pos]
@@ -304,11 +327,14 @@ func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
 		}
 	}
 
+	r.localCount += int64(len(c.Delta))
+
 	return nil
 }
 
 func (r *DeltaReplicator) End() {
 	// TODO: Take a snapshot here
+	atomic.AddInt64(r.totalCount, r.localCount)
 }
 
 func (r *DeltaReplicator) processUpdate(timestamp int64, c *scylla_cdc.ChangeRow) error {

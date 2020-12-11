@@ -75,20 +75,36 @@ type TableBackedProgressManager struct {
 	ttl int32
 }
 
-func (tbpm *TableBackedProgressManager) EnsureTableExists() error {
+func NewTableBackedProgressManager(session *gocql.Session, progressTableName string) (*TableBackedProgressManager, error) {
+	tbpm := &TableBackedProgressManager{
+		session:           session,
+		progressTableName: progressTableName,
+
+		ttl: 7 * 24 * 60 * 60, // 1 week
+	}
+
+	if err := tbpm.ensureTableExists(); err != nil {
+		return nil, err
+	}
+	return tbpm, nil
+}
+
+func (tbpm *TableBackedProgressManager) ensureTableExists() error {
 	return tbpm.session.Query(
-		"CREATE TABLE IF NOT EXISTS %s "+
-			"(generation timestamp, table_name text, stream_id blob, last_timestamp timeuuid, current_generation timestamp"+
-			"PRIMARY KEY ((generation, table_name, stream_id)))",
-		tbpm.progressTableName,
+		fmt.Sprintf(
+			"CREATE TABLE IF NOT EXISTS %s "+
+				"(generation timestamp, table_name text, stream_id blob, last_timestamp timeuuid, current_generation timestamp, "+
+				"PRIMARY KEY ((generation, table_name, stream_id)))",
+			tbpm.progressTableName,
+		),
 	).Exec()
 }
 
 func (tbpm *TableBackedProgressManager) GetCurrentGeneration() (time.Time, error) {
 	var gen time.Time
 	err := tbpm.session.Query(
-		fmt.Sprintf("SELECT current_generation FROM %s WHERE generation = ?, table_name = ?, stream_id = ?", tbpm.progressTableName),
-		time.Time{}, "", []byte{}, gen,
+		fmt.Sprintf("SELECT current_generation FROM %s WHERE generation = ? AND table_name = ? AND stream_id = ?", tbpm.progressTableName),
+		time.Time{}, "", []byte{},
 	).Scan(&gen)
 
 	if err != nil && err != gocql.ErrNotFound {

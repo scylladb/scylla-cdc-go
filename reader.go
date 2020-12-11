@@ -30,6 +30,10 @@ type ReaderConfig struct {
 	// A callback which processes information fetched from the CDC log.
 	ChangeConsumerFactory ChangeConsumerFactory
 
+	// An object which allows the reader to read and write information about
+	// current progress.
+	ProgressManager ProgressManager
+
 	// An object which tracks cluster metadata such as current tokens and node count.
 	// While this object is optional, it is highly recommended that this field points to a valid ClusterStateTracker.
 	// For usage, refer to the example application.
@@ -58,6 +62,7 @@ type AdvancedReaderConfig struct {
 func NewReaderConfig(
 	session *gocql.Session,
 	consumerFactory ChangeConsumerFactory,
+	progressManager ProgressManager,
 	tableNames ...string,
 ) *ReaderConfig {
 	return &ReaderConfig{
@@ -65,6 +70,7 @@ func NewReaderConfig(
 		TableNames:            tableNames,
 		Consistency:           gocql.Quorum,
 		ChangeConsumerFactory: consumerFactory,
+		ProgressManager:       progressManager,
 
 		Advanced: AdvancedReaderConfig{
 			ConfidenceWindowSize: 30 * time.Second,
@@ -107,7 +113,20 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 		config.Logger = &noLogger{}
 	}
 
-	readFrom := time.Now().Add(-config.Advanced.ChangeAgeLimit)
+	if config.ProgressManager == nil {
+		return nil, errors.New("no progress manager was specified")
+	}
+
+	readFrom, err := config.ProgressManager.GetCurrentGeneration()
+	if err != nil {
+		return nil, err
+	}
+	if readFrom.IsZero() {
+		readFrom = time.Now().Add(-config.Advanced.ChangeAgeLimit)
+		config.Logger.Printf("no saved progress found, will start reading from %v", readFrom)
+	} else {
+		config.Logger.Printf("last saved progress was at generation %v", readFrom)
+	}
 
 	genFetcher, err := newGenerationFetcher(
 		config.Session,
@@ -131,8 +150,6 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 // Run runs the CDC reader. This call is blocking and returns after an error occurs, or the reader
 // is stopped gracefully.
 func (r *Reader) Run(ctx context.Context) error {
-	// TODO: Return a "snapshot" or something
-
 	l := r.config.Logger
 
 	runErrG, runCtx := errgroup.WithContext(ctx)
@@ -155,8 +172,16 @@ func (r *Reader) Run(ctx context.Context) error {
 			return err
 		}
 
+		if r.readFrom.Before(gen.startTime) {
+			r.readFrom = gen.startTime
+		}
+
 		for {
 			l.Printf("starting reading generation %v from timestamp %v", gen.startTime, r.readFrom)
+
+			if err := r.config.ProgressManager.StartGeneration(gen.startTime); err != nil {
+				return err
+			}
 
 			// Start batch readers for this generation
 			split, err := r.splitStreams(gen.streams)
@@ -175,6 +200,7 @@ func (r *Reader) Run(ctx context.Context) error {
 				for _, group := range split {
 					readers = append(readers, newStreamBatchReader(
 						r.config,
+						gen.startTime,
 						group,
 						splitName[0],
 						splitName[1],
@@ -188,9 +214,7 @@ func (r *Reader) Run(ctx context.Context) error {
 				reader := readers[i] // TODO: Should this be interruptible?
 				<-time.After(sleepAmount)
 				genErrG.Go(func() error {
-					// TODO: Do something sensible with returned timeuuid
-					_, err := reader.run(genCtx)
-					return err
+					return reader.run(genCtx)
 				})
 			}
 
@@ -227,6 +251,10 @@ func (r *Reader) Run(ctx context.Context) error {
 				break
 			}
 			gen = nextGen
+
+			if err := r.config.ProgressManager.EndGeneration(gen.startTime); err != nil {
+				return err
+			}
 		}
 
 		return nil
