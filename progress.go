@@ -35,7 +35,7 @@ type ProgressManager interface {
 }
 
 type Progress struct {
-	Time gocql.UUID
+	LastProcessedRecordTime gocql.UUID
 }
 
 // NoProgressManager does not persist the progress at all. It can be used
@@ -134,7 +134,7 @@ func (tbpm *TableBackedProgressManager) GetProgress(gen time.Time, tableName str
 func (tbpm *TableBackedProgressManager) SaveProgress(gen time.Time, tableName string, streamID StreamID, progress Progress) error {
 	return tbpm.session.Query(
 		fmt.Sprintf("INSERT INTO %s (generation, table_name, stream_id, last_timestamp) VALUES (?, ?, ?, ?) USING TTL ?", tbpm.progressTableName),
-		gen, tableName, streamID, progress.Time, tbpm.ttl,
+		gen, tableName, streamID, progress.LastProcessedRecordTime, tbpm.ttl,
 	).Exec()
 }
 

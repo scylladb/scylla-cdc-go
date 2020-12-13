@@ -58,7 +58,7 @@ func (sbr *streamBatchReader) run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		oldProgress[string(stream)] = progress.Time
+		oldProgress[string(stream)] = progress.LastProcessedRecordTime
 	}
 
 	minTime := oldProgress[string(sbr.streams[0])]

@@ -17,7 +17,6 @@ import (
 )
 
 // TODO: Escape field names?
-// TODO: Tuple support
 
 var showTimestamps = true
 var debugQueries = false
@@ -123,11 +122,6 @@ func MakeReplicator(
 		return nil, nil, err
 	}
 
-	progressManager, err := scylla_cdc.NewTableBackedProgressManager(session, "ks.cdc_go_replicator_progress")
-	if err != nil {
-		return nil, nil, err
-	}
-
 	rowsRead := new(int64)
 
 	factory := &replicatorFactory{
@@ -138,10 +132,11 @@ func MakeReplicator(
 	}
 
 	// Configuration for the CDC reader
+	// TODO: Allow specifying a progress manager
 	cfg := scylla_cdc.NewReaderConfig(
 		session,
 		factory,
-		progressManager,
+		&scylla_cdc.NoProgressManager{},
 		tableNames...,
 	)
 	if advancedParams != nil {
@@ -833,6 +828,7 @@ func tryWithExponentialBackoff(f func() error) error {
 
 		log.Printf("ERROR (%d/%d): %s", i+1, retryCount, err)
 
+		// TODO: Add some random variation to the retries
 		<-time.After(dur)
 		dur *= 2
 		if dur > maxWaitBetweenRetries {

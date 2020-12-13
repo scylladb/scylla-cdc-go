@@ -3,7 +3,6 @@ package scylla_cdc
 import (
 	"fmt"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -285,9 +284,6 @@ func (c *ChangeRow) Columns() []gocql.ColumnInfo {
 }
 
 func (c *ChangeRow) String() string {
-	// TODO: This doesn't work correctly because null columns are not inserted
-	// to the map
-
 	var b strings.Builder
 	b.WriteString(OperationType(c.cdcCols.operation).String())
 	b.WriteString(" ")
@@ -295,49 +291,38 @@ func (c *ChangeRow) String() string {
 	b.WriteString(" -> {")
 	first := true
 
-	// Sort field names
-	sortedFieldNames := make([]string, 0, len(c.data))
-	for k := range c.data {
-		if strings.HasPrefix(k, "cdc$deleted_") {
-			continue
-		}
-		sortedFieldNames = append(sortedFieldNames, k)
-	}
+	for _, info := range c.colInfos {
+		v, hasValue := c.GetValue(info.Name)
+		isDeleted, hasDeleted := c.IsDeleted(info.Name)
+		deletedElements, hasDeletedElements := c.GetDeletedElements(info.Name)
 
-	// Copy field names, and included cdc$deleted_ columns
-	sort.Strings(sortedFieldNames)
-	ks := make([]string, 0, len(c.data))
-	for _, k := range sortedFieldNames {
-		ks = append(ks, k)
-		deleted := "cdc$deleted_" + k
-		deletedElements := "cdc$deleted_elements_" + k
-		if _, hasDeleted := c.data[deleted]; hasDeleted {
-			ks = append(ks, deleted)
-		}
-		if _, hasDeletedElements := c.data[deletedElements]; hasDeletedElements {
-			ks = append(ks, deletedElements)
-		}
-	}
-
-	// Print columns in order
-	for _, k := range ks {
-		v, present := c.data[k]
 		if !first {
-			b.WriteString(" ")
+			b.WriteString(", ")
 		}
 		first = false
-		b.WriteString(k)
+
+		b.WriteString(info.Name)
 		b.WriteString(":")
-		if strings.HasPrefix(k, "cdc$deleted_") {
+		if hasValue {
 			b.WriteString(fmt.Sprintf("%v", v))
 		} else {
-			if present {
-				b.WriteString(fmt.Sprintf("%v", v))
-			} else {
-				b.WriteString("nil")
-			}
+			b.WriteString("nil")
+		}
+
+		if hasDeleted {
+			b.WriteString(", cdc$deleted_")
+			b.WriteString(info.Name)
+			b.WriteString(":")
+			b.WriteString(fmt.Sprintf("%t", isDeleted))
+		}
+		if hasDeletedElements {
+			b.WriteString(", cdc$deleted_elements_")
+			b.WriteString(info.Name)
+			b.WriteString(":")
+			b.WriteString(fmt.Sprintf("%v", deletedElements))
 		}
 	}
+
 	b.WriteString("}")
 	return b.String()
 }
