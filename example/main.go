@@ -14,14 +14,9 @@ import (
 // TODO: Remove?
 
 func main() {
-	// This wrapper around HostSelectionPolicy is used in order to forward information about the cluster topology
-	// to the Reader. This is a limitation of gocql library and the need for it will be removed if the needed
-	// functionality is implemented in gocql.
-	tracker := scylla_cdc.NewClusterStateTracker(gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy()))
-
 	// Configure a session first
 	cluster := gocql.NewCluster("127.0.0.1")
-	cluster.PoolConfig.HostSelectionPolicy = tracker
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
 	session, err := cluster.CreateSession()
 	if err != nil {
 		log.Fatal(err)
@@ -34,7 +29,6 @@ func main() {
 		Consistency:           gocql.One,
 		TableNames:            []string{"ks.tbl"},
 		ChangeConsumerFactory: scylla_cdc.MakeChangeConsumerFactoryFromFunc(simpleConsumer),
-		ClusterStateTracker:   tracker,
 		ProgressManager:       &scylla_cdc.NoProgressManager{},
 
 		Logger: log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),

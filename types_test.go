@@ -233,11 +233,9 @@ func TestTypes(t *testing.T) {
 		ConfidenceWindowSize:   0,
 	}
 
-	tracker := NewClusterStateTracker(gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy()))
-
 	// Configure a session
 	cluster := gocql.NewCluster(address)
-	cluster.PoolConfig.HostSelectionPolicy = tracker
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
 	session, err := cluster.CreateSession()
 	if err != nil {
 		t.Fatal(err)
@@ -271,7 +269,6 @@ func TestTypes(t *testing.T) {
 		tableNames...,
 	)
 	cfg.Advanced = adv
-	cfg.ClusterStateTracker = tracker
 	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
 	reader, err := NewReader(cfg)

@@ -114,11 +114,9 @@ func MakeReplicator(
 		return nil, nil, err
 	}
 
-	tracker := scylla_cdc.NewClusterStateTracker(gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy()))
-
 	// Configure a session
 	cluster := gocql.NewCluster(source)
-	cluster.PoolConfig.HostSelectionPolicy = tracker
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
 	session, err := cluster.CreateSession()
 	if err != nil {
 		destinationSession.Close()
@@ -150,7 +148,6 @@ func MakeReplicator(
 		cfg.Advanced = *advancedParams
 	}
 	cfg.Consistency = consistency
-	cfg.ClusterStateTracker = tracker
 	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
 	reader, err := scylla_cdc.NewReader(cfg)

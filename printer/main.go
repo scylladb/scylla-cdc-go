@@ -27,11 +27,9 @@ func main() {
 	flag.StringVar(&source, "source", "127.0.0.1", "address of a node in the cluster")
 	flag.Parse()
 
-	tracker := scylla_cdc.NewClusterStateTracker(gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy()))
-
 	// Configure a session first
 	cluster := gocql.NewCluster(source)
-	cluster.PoolConfig.HostSelectionPolicy = tracker
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
 	session, err := cluster.CreateSession()
 	if err != nil {
 		log.Fatal(err)
@@ -44,7 +42,6 @@ func main() {
 		&scylla_cdc.NoProgressManager{},
 		keyspace+"."+table,
 	)
-	cfg.ClusterStateTracker = tracker
 	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
 	reader, err := scylla_cdc.NewReader(cfg)

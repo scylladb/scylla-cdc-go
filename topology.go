@@ -55,13 +55,10 @@ func (gl generationList) Swap(i, j int) {
 }
 
 type generationFetcher struct {
-	session        *gocql.Session
-	clusterTracker *ClusterStateTracker
-	genTableName   string
-	lastTime       time.Time
-	logger         Logger
-
-	consistency gocql.Consistency
+	session      *gocql.Session
+	genTableName string
+	lastTime     time.Time
+	logger       Logger
 
 	generationCh chan *generation
 	refreshCh    chan struct{}
@@ -70,7 +67,6 @@ type generationFetcher struct {
 
 func newGenerationFetcher(
 	session *gocql.Session,
-	clusterTracker *ClusterStateTracker,
 	startFrom time.Time,
 	logger Logger,
 ) (*generationFetcher, error) {
@@ -79,27 +75,11 @@ func newGenerationFetcher(
 		return nil, err
 	}
 
-	// Detect consistency, based on the cluster size
-	clusterSize := 1
-	if clusterTracker != nil {
-		clusterSize = clusterTracker.GetClusterSize()
-	}
-
-	consistency := gocql.One
-	if clusterSize == 2 {
-		consistency = gocql.Quorum
-	} else if clusterSize > 2 {
-		consistency = gocql.All
-	}
-
 	gf := &generationFetcher{
-		session:        session,
-		clusterTracker: clusterTracker,
-		genTableName:   tableName,
-		lastTime:       startFrom,
-		logger:         logger,
-
-		consistency: consistency,
+		session:      session,
+		genTableName: tableName,
+		lastTime:     startFrom,
+		logger:       logger,
 
 		generationCh: make(chan *generation, 1),
 		stopCh:       make(chan struct{}),
@@ -198,7 +178,20 @@ func (gf *generationFetcher) fetchFromGenerationsTable(
 	query *gocql.Query,
 	timePoint time.Time,
 ) ([]*generation, error) {
-	iter := query.Consistency(gf.consistency).Bind(timePoint).Iter()
+	// Decide on the consistency to use
+	size, err := gf.getClusterSize()
+	if err != nil {
+		return nil, err
+	}
+
+	consistency := gocql.One
+	if size == 2 {
+		consistency = gocql.Quorum
+	} else if size >= 3 {
+		consistency = gocql.All
+	}
+
+	iter := query.Consistency(consistency).Bind(timePoint).Iter()
 
 	var gl generationList
 	for {
@@ -230,6 +223,17 @@ func (gf *generationFetcher) pushGeneration(gen *generation) (shouldStop bool) {
 		gf.lastTime = gen.startTime
 		return false
 	}
+}
+
+// Unfortunately, gocql does not expose information about the cluster,
+// therefore we need to poll system.peers manually
+func (gf *generationFetcher) getClusterSize() (int, error) {
+	var size int
+	err := gf.session.Query("SELECT COUNT(*) FROM system.peers").Scan(&size)
+	if err != nil {
+		return 0, err
+	}
+	return size + 1, nil
 }
 
 // Finds a name of a supported table for fetching cdc streams

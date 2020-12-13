@@ -1,17 +1,16 @@
 package scylla_cdc
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gocql/gocql"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 )
 
 type ReaderConfig struct {
@@ -33,11 +32,6 @@ type ReaderConfig struct {
 	// An object which allows the reader to read and write information about
 	// current progress.
 	ProgressManager ProgressManager
-
-	// An object which tracks cluster metadata such as current tokens and node count.
-	// While this object is optional, it is highly recommended that this field points to a valid ClusterStateTracker.
-	// For usage, refer to the example application.
-	ClusterStateTracker *ClusterStateTracker
 
 	// A logger. If set, it will receive log messages useful for debugging of the library.
 	Logger Logger
@@ -105,6 +99,8 @@ type Reader struct {
 	readFrom   time.Time
 	stoppedCh  chan struct{}
 	stopTime   atomic.Value
+
+	saveLimiter *semaphore.Weighted
 }
 
 // Creates a new CDC reader.
@@ -130,7 +126,6 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 
 	genFetcher, err := newGenerationFetcher(
 		config.Session,
-		config.ClusterStateTracker,
 		readFrom,
 		config.Logger,
 	)
@@ -143,6 +138,8 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 		genFetcher: genFetcher,
 		readFrom:   readFrom,
 		stoppedCh:  make(chan struct{}),
+
+		saveLimiter: semaphore.NewWeighted(100),
 	}
 	return reader, nil
 }
@@ -184,10 +181,7 @@ func (r *Reader) Run(ctx context.Context) error {
 			}
 
 			// Start batch readers for this generation
-			split, err := r.splitStreams(gen.streams)
-			if err != nil {
-				return err
-			}
+			split := r.splitStreams(gen.streams)
 
 			l.Printf("grouped %d streams into %d batches", len(gen.streams), len(split))
 
@@ -205,6 +199,7 @@ func (r *Reader) Run(ctx context.Context) error {
 						splitName[0],
 						splitName[1],
 						gocql.MinTimeUUID(r.readFrom),
+						r.saveLimiter,
 					))
 				}
 			}
@@ -282,37 +277,43 @@ func (r *Reader) StopAt(at time.Time) {
 	close(r.stoppedCh)
 }
 
-func (r *Reader) splitStreams(streams []StreamID) (split [][]StreamID, err error) {
-	if r.config.ClusterStateTracker == nil {
-		// This method of polling is quite bad for performance, but we cannot do better without the tracker
-		// TODO: Maybe forbid, or at least warn?
-		for _, s := range streams {
-			split = append(split, []StreamID{s})
-		}
-		return
-	}
-
-	tokens := r.config.ClusterStateTracker.GetTokens()
-	vnodesToStreams := make(map[int64][]StreamID, 0)
-
+func (r *Reader) splitStreams(streams []StreamID) [][]StreamID {
+	vnodesIdxToStreams := make(map[int64][]StreamID, 0)
 	for _, stream := range streams {
-		var streamInt int64
-		if err := binary.Read(bytes.NewReader(stream), binary.BigEndian, &streamInt); err != nil {
-			return nil, err
-		}
-		idx := sort.Search(len(tokens), func(i int) bool {
-			return !(tokens[i] < streamInt)
-		})
-		if idx >= len(tokens) {
-			idx = 0
-		}
-		chosenTok := tokens[idx]
-		vnodesToStreams[chosenTok] = append(vnodesToStreams[chosenTok], stream)
+		idx := getVnodeIndexForStream(stream)
+		vnodesIdxToStreams[idx] = append(vnodesIdxToStreams[idx], stream)
 	}
 
-	groups := make([][]StreamID, 0, len(vnodesToStreams))
-	for _, streams := range vnodesToStreams {
-		groups = append(groups, streams)
+	groups := make([][]StreamID, 0)
+
+	// Idx -1 means that we don't know the vnode for given stream,
+	// therefore we will put those streams into a separate group
+	for _, stream := range vnodesIdxToStreams[-1] {
+		groups = append(groups, []StreamID{stream})
 	}
-	return groups, nil
+	delete(vnodesIdxToStreams, -1)
+
+	for _, group := range vnodesIdxToStreams {
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+// Computes vnode index from given stream ID.
+// Returns -1 if the stream ID format is unrecognized.
+func getVnodeIndexForStream(streamID StreamID) int64 {
+	if len(streamID) != 16 {
+		// Don't know how to handle other sizes
+		return -1
+	}
+
+	lowerQword := binary.BigEndian.Uint64(streamID[8:16])
+	version := lowerQword & (1<<4 - 1)
+	if version != 1 {
+		// Unrecognized version
+		return -1
+	}
+
+	vnodeIdx := (lowerQword >> 4) & (1<<22 - 1)
+	return int64(vnodeIdx)
 }
