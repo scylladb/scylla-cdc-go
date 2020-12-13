@@ -24,9 +24,6 @@ type ProgressManager interface {
 	// should start processing the next generation.
 	StartGeneration(gen time.Time) error
 
-	// EndGeneration marks all streams in the generation as "done".
-	EndGeneration(gen time.Time) error
-
 	// GetProgress retrieves information about the progress of given shard,
 	// in a given table.
 	GetProgress(gen time.Time, table string, streamID StreamID) (Progress, error)
@@ -50,10 +47,6 @@ func (*NoProgressManager) GetCurrentGeneration() (time.Time, error) {
 }
 
 func (*NoProgressManager) StartGeneration(gen time.Time) error {
-	return nil
-}
-
-func (*NoProgressManager) EndGeneration(gen time.Time) error {
 	return nil
 }
 
@@ -123,12 +116,6 @@ func (tbpm *TableBackedProgressManager) StartGeneration(gen time.Time) error {
 		),
 		time.Time{}, "", []byte{}, gen,
 	).Exec()
-}
-
-func (tbpm *TableBackedProgressManager) EndGeneration(gen time.Time) error {
-	// Do nothing. The partition which holds information about current generation
-	// will be updated in StartGeneration.
-	return nil
 }
 
 func (tbpm *TableBackedProgressManager) GetProgress(gen time.Time, tableName string, streamID StreamID) (Progress, error) {

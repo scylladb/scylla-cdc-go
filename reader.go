@@ -246,10 +246,6 @@ func (r *Reader) Run(ctx context.Context) error {
 				break
 			}
 			gen = nextGen
-
-			if err := r.config.ProgressManager.EndGeneration(gen.startTime); err != nil {
-				return err
-			}
 		}
 
 		return nil
