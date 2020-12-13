@@ -206,8 +206,12 @@ func (r *Reader) Run(ctx context.Context) error {
 
 			sleepAmount := r.config.Advanced.PostNonEmptyQueryDelay / time.Duration(len(readers))
 			for i := range readers {
-				reader := readers[i] // TODO: Should this be interruptible?
-				<-time.After(sleepAmount)
+				reader := readers[i]
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(sleepAmount):
+				}
 				genErrG.Go(func() error {
 					return reader.run(genCtx)
 				})

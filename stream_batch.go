@@ -133,7 +133,6 @@ outer:
 							change.StreamID = streamCols.streamID
 							change.Time = streamCols.time
 							if err := consumer.Consume(change); err != nil {
-								// TODO: Does that make sense?
 								sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
 								return err
 							}

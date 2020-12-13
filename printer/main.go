@@ -13,8 +13,6 @@ import (
 	scylla_cdc "github.com/piodul/scylla-cdc-go"
 )
 
-// TODO: Fix printing
-
 func main() {
 	var (
 		keyspace string

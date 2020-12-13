@@ -639,7 +639,6 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 }
 
 func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.ChangeRow) error {
-	// TODO: Cache vals?
 	vals := make([]interface{}, 0, len(r.pkColumns)+len(r.ckColumns))
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
 	vals = appendKeyValuesToBind(vals, r.ckColumns, c)
@@ -660,7 +659,6 @@ func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.Change
 }
 
 func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.ChangeRow) error {
-	// TODO: Cache vals?
 	vals := make([]interface{}, 0, len(r.pkColumns))
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
 
@@ -680,7 +678,6 @@ func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.
 }
 
 func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla_cdc.ChangeRow) error {
-	// TODO: Cache vals?
 	vals := make([]interface{}, 0)
 	vals = appendKeyValuesToBind(vals, r.pkColumns, start)
 
