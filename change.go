@@ -137,7 +137,7 @@ type SetChange struct {
 	// RemovedElements contains a slice of values which were removed from the set
 	// by the operation. Like AddedValues, it's either a slice or a nil
 	// interface.
-	// Please not that if the operation overwrote the old value of the set
+	// Please note that if the operation overwrote the old value of the set
 	// instead of adding/removing elements, this field _will be nil_.
 	// Instead, IsReset field will be set, and AddedValues will contain
 	// the new state of the set.
@@ -161,7 +161,7 @@ type MapChange struct {
 
 	// RemovedElements contains a slice of keys which were removed from the map
 	// by the operation.
-	// Please not that if the operation overwrote the old value of the map
+	// Please note that if the operation overwrote the old value of the map
 	// instead of adding/removing elements, this field _will be nil_.
 	// Instead, IsReset field will be set, and AddedValues will contain
 	// the new state of the map.

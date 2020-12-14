@@ -20,35 +20,29 @@ import (
 
 var showTimestamps = true
 var debugQueries = false
-var retryCount = 20
 var maxWaitBetweenRetries = 5 * time.Second
 
 func main() {
 	var (
-		keyspace    string
-		table       string
-		source      string
-		destination string
-		consistency string
+		keyspace         string
+		table            string
+		source           string
+		destination      string
+		readConsistency  string
+		writeConsistency string
 	)
 
 	flag.StringVar(&keyspace, "keyspace", "", "keyspace name")
 	flag.StringVar(&table, "table", "", "table name")
 	flag.StringVar(&source, "source", "", "address of a node in source cluster")
 	flag.StringVar(&destination, "destination", "", "address of a node in destination cluster")
-	flag.StringVar(&consistency, "consistency", "", "consistency level (one, quorum, all)")
+	flag.StringVar(&readConsistency, "read-consistency", "", "consistency level used to read from cdc log (one, quorum, all)")
+	flag.StringVar(&writeConsistency, "write-consistency", "", "consistency level used to write to the destination cluster (one, quorum, all)")
 	flag.String("mode", "", "mode (ignored)")
 	flag.Parse()
 
-	cl := gocql.One
-	switch strings.ToLower(consistency) {
-	case "one":
-		cl = gocql.One
-	case "quorum":
-		cl = gocql.Quorum
-	case "all":
-		cl = gocql.All
-	}
+	clRead := parseConsistency(readConsistency)
+	clWrite := parseConsistency(writeConsistency)
 
 	adv := scylla_cdc.AdvancedReaderConfig{
 		ConfidenceWindowSize:   30 * time.Second,
@@ -59,11 +53,27 @@ func main() {
 		PostFailedQueryDelay:   1 * time.Second,
 	}
 
+	fmt.Println("Parameters:")
+	fmt.Printf("  Keyspace: %s\n", keyspace)
+	fmt.Printf("  Table: %s\n", table)
+	fmt.Printf("  Source cluster IP: %s\n", source)
+	fmt.Printf("  Destination cluster IP: %s\n", destination)
+	fmt.Printf("  Consistency for reads: %s\n", clRead)
+	fmt.Printf("  Consistency for writes: %s\n", clWrite)
+	fmt.Println("Advanced reader parameters:")
+	fmt.Printf("  Confidence window size: %s\n", adv.ConfidenceWindowSize)
+	fmt.Printf("  Change age limit: %s\n", adv.ChangeAgeLimit)
+	fmt.Printf("  Query window size: %s\n", adv.QueryTimeWindowSize)
+	fmt.Printf("  Delay after poll with empty results: %s\n", adv.PostEmptyQueryDelay)
+	fmt.Printf("  Delay after poll with non-empty results: %s\n", adv.PostNonEmptyQueryDelay)
+	fmt.Printf("  Delay after failed poll: %s\n", adv.PostEmptyQueryDelay)
+
 	reader, rowsRead, err := MakeReplicator(
 		source, destination,
 		[]string{keyspace + "." + table},
 		&adv,
-		cl,
+		clRead,
+		clWrite,
 	)
 	if err != nil {
 		log.Fatalln(err)
@@ -93,18 +103,32 @@ func main() {
 	signal.Notify(signalC, os.Interrupt)
 
 	if err := reader.Run(ctx); err != nil {
-		log.Println(err)
-		os.Exit(1)
+		log.Fatalln(err)
 	}
 
 	log.Printf("quitting, rows read: %d", *rowsRead)
+}
+
+func parseConsistency(s string) gocql.Consistency {
+	switch strings.ToLower(s) {
+	case "one":
+		return gocql.One
+	case "quorum":
+		return gocql.Quorum
+	case "all":
+		return gocql.All
+	default:
+		log.Printf("warning: got unsupported consistency level \"%s\", will use \"one\" instead", s)
+		return gocql.One
+	}
 }
 
 func MakeReplicator(
 	source, destination string,
 	tableNames []string,
 	advancedParams *scylla_cdc.AdvancedReaderConfig,
-	consistency gocql.Consistency,
+	readConsistency gocql.Consistency,
+	writeConsistency gocql.Consistency,
 ) (*scylla_cdc.Reader, *int64, error) {
 	// Configure a session for the destination cluster
 	destinationCluster := gocql.NewCluster(destination)
@@ -126,7 +150,7 @@ func MakeReplicator(
 
 	factory := &replicatorFactory{
 		destinationSession: destinationSession,
-		consistency:        consistency,
+		consistency:        writeConsistency,
 
 		rowsRead: rowsRead,
 	}
@@ -142,7 +166,7 @@ func MakeReplicator(
 	if advancedParams != nil {
 		cfg.Advanced = *advancedParams
 	}
-	cfg.Consistency = consistency
+	cfg.Consistency = readConsistency
 	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
 	reader, err := scylla_cdc.NewReader(cfg)
@@ -194,9 +218,9 @@ type DeltaReplicator struct {
 	columnTypes  map[string]TypeInfo
 	allColumns   []string
 
+	insertStr               string
 	rowDeleteQueryStr       string
 	partitionDeleteQueryStr string
-	rangeDeleteQueryStrs    []string
 
 	localCount int64
 	totalCount *int64
@@ -251,23 +275,30 @@ func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, m
 		totalCount: count,
 	}
 
-	dr.computeRowDeleteQuery()
-	dr.computePartitionDeleteQuery()
+	dr.precomputeQueries()
 
 	return dr, nil
 }
 
-func (r *DeltaReplicator) computeRowDeleteQuery() {
+func (r *DeltaReplicator) precomputeQueries() {
 	keyColumns := append(append([]string{}, r.pkColumns...), r.ckColumns...)
+
+	var bindMarkers []string
+	for _, columnName := range keyColumns {
+		bindMarkers = append(bindMarkers, makeBindMarkerForType(r.columnTypes[columnName]))
+	}
+
+	r.insertStr = fmt.Sprintf(
+		"INSERT INTO %s (%s) VALUES (%s) USING TTL ?",
+		r.tableName, strings.Join(keyColumns, ", "), strings.Join(bindMarkers, ", "),
+	)
 
 	r.rowDeleteQueryStr = fmt.Sprintf(
 		"DELETE FROM %s WHERE %s",
 		r.tableName,
 		r.makeBindMarkerAssignments(keyColumns, " AND "),
 	)
-}
 
-func (r *DeltaReplicator) computePartitionDeleteQuery() {
 	r.partitionDeleteQueryStr = fmt.Sprintf(
 		"DELETE FROM %s WHERE %s",
 		r.tableName,
@@ -359,20 +390,10 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 	if isInsert {
 		// Insert row to make a row marker
 		// The rest of the columns will be set by using UPDATE queries
-		var bindMarkers []string
-		for _, columnName := range keyColumns {
-			bindMarkers = append(bindMarkers, makeBindMarkerForType(r.columnTypes[columnName]))
-		}
-
-		insertStr := fmt.Sprintf(
-			"INSERT INTO %s (%s) VALUES (%s) USING TTL ?",
-			r.tableName, strings.Join(keyColumns, ", "), strings.Join(bindMarkers, ", "),
-		)
-
 		var vals []interface{}
 		vals = appendKeyValuesToBind(vals, keyColumns, c)
 		vals = append(vals, c.GetTTL())
-		if err := runQuery(insertStr, vals); err != nil {
+		if err := runQuery(r.insertStr, vals); err != nil {
 			return err
 		}
 	}
@@ -817,13 +838,16 @@ func appendKeyValuesToBind(
 func tryWithExponentialBackoff(f func() error) error {
 	dur := 50 * time.Millisecond
 	var err error
-	for i := 0; i < retryCount; i++ {
+	// TODO: Make it stop when the replicator is shut down
+	i := 0
+	for {
 		err = f()
 		if err == nil {
 			return nil
 		}
 
-		log.Printf("ERROR (%d/%d): %s", i+1, retryCount, err)
+		log.Printf("ERROR (try #%d): %s", i+1, err)
+		i++
 
 		// TODO: Add some random variation to the retries
 		<-time.After(dur)
