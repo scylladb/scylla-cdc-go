@@ -5,20 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
-)
-
-var (
-	// The table that keeps names of the generations changed names.
-	// This is a list of known supported names, starting from the newest one.
-	generationsTableNames []string = []string{
-		"system_distributed.cdc_streams_descriptions", // Introduced in Scylla 4.3
-		"system_distributed.cdc_streams",              // Introduced in Scylla 4.1
-		"system_distributed.cdc_description",
-	}
 )
 
 var (
@@ -27,6 +16,8 @@ var (
 )
 
 const (
+	generationsTableName = "system_distributed.cdc_streams_descriptions"
+
 	// TODO: Switch to a model which reacts to cluster state changes
 	// and forces a refresh when all worker goroutines did not report any
 	// changes for some time
@@ -55,10 +46,9 @@ func (gl generationList) Swap(i, j int) {
 }
 
 type generationFetcher struct {
-	session      *gocql.Session
-	genTableName string
-	lastTime     time.Time
-	logger       Logger
+	session  *gocql.Session
+	lastTime time.Time
+	logger   Logger
 
 	generationCh chan *generation
 	refreshCh    chan struct{}
@@ -70,16 +60,10 @@ func newGenerationFetcher(
 	startFrom time.Time,
 	logger Logger,
 ) (*generationFetcher, error) {
-	tableName, err := getGenerationsTableName(session)
-	if err != nil {
-		return nil, err
-	}
-
 	gf := &generationFetcher{
-		session:      session,
-		genTableName: tableName,
-		lastTime:     startFrom,
-		logger:       logger,
+		session:  session,
+		lastTime: startFrom,
+		logger:   logger,
 
 		generationCh: make(chan *generation, 1),
 		stopCh:       make(chan struct{}),
@@ -91,8 +75,8 @@ func newGenerationFetcher(
 func (gf *generationFetcher) Run(ctx context.Context) error {
 	l := gf.logger
 
-	queryGensUpToTime := gf.session.Query(fmt.Sprintf("SELECT time, streams FROM %s WHERE time <= ? ALLOW FILTERING", gf.genTableName))
-	queryGensAfterTime := gf.session.Query(fmt.Sprintf("SELECT time, streams FROM %s WHERE time > ? ALLOW FILTERING", gf.genTableName))
+	queryGensUpToTime := gf.session.Query(fmt.Sprintf("SELECT time, streams FROM %s WHERE time <= ? ALLOW FILTERING", generationsTableName))
+	queryGensAfterTime := gf.session.Query(fmt.Sprintf("SELECT time, streams FROM %s WHERE time > ? ALLOW FILTERING", generationsTableName))
 
 	// Find the generation which contains the timestamp from which we should
 	// start reading
@@ -238,24 +222,5 @@ func (gf *generationFetcher) getClusterSize() (int, error) {
 
 // Finds a name of a supported table for fetching cdc streams
 func getGenerationsTableName(session *gocql.Session) (string, error) {
-	for _, name := range generationsTableNames {
-		splitName := strings.Split(name, ".")
-		keyspaceName := splitName[0]
-		tableName := splitName[1]
-
-		queryString := fmt.Sprintf("SELECT COUNT(*) FROM system_schema.tables WHERE keyspace_name = '%s' AND table_name = '%s'", keyspaceName, tableName)
-		iter := session.Query(queryString).Consistency(gocql.One).Iter()
-		var count int
-		iter.Scan(&count)
-
-		if err := iter.Close(); err != nil {
-			return "", err
-		}
-
-		if count == 1 {
-			return name, nil
-		}
-	}
-
-	return "", ErrNoGenerationsTable
+	return "system_distributed.cdc_streams_descriptions", nil
 }
