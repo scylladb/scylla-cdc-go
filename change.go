@@ -69,17 +69,21 @@ func (c *Change) GetCassandraTimestamp() int64 {
 // ChangeRow corresponds to a single row from the cdc log
 type ChangeRow struct {
 	data    map[string]interface{}
-	cdcCols cdcChangeCols
+	cdcCols cdcChangeRowCols
 
 	colInfos []gocql.ColumnInfo
 }
 
-type cdcStreamCols struct {
+// Contains columns specific to a change row batch (rows which have
+// the same cdc$stream_id and cdc$time)
+type cdcChangeBatchCols struct {
 	streamID []byte
 	time     gocql.UUID
 }
 
-type cdcChangeCols struct {
+// Contains columns specific to a change row, but independent from
+// the base table schema.
+type cdcChangeRowCols struct {
 	batchSeqNo int32
 	operation  int8
 	ttl        int64
@@ -430,7 +434,7 @@ func (crq *changeRowQuerier) queryRange(start gocql.UUID, end gocql.UUID) (*chan
 	}
 
 	queryStr := fmt.Sprintf(
-		"SELECT %s FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" < ? BYPASS CACHE",
+		"SELECT %s FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" <= ? BYPASS CACHE",
 		strings.Join(colNames, ", "),
 		crq.keyspaceName,
 		crq.tableName,
@@ -450,8 +454,8 @@ type changeRowIterator struct {
 	iter         *gocql.Iter
 	columnValues []interface{}
 
-	cdcStreamCols cdcStreamCols
-	cdcChangeCols cdcChangeCols
+	cdcChangeBatchCols cdcChangeBatchCols
+	cdcChangeRowCols   cdcChangeRowCols
 
 	colInfos        []gocql.ColumnInfo
 	tupleNameToIdx  map[string]int
@@ -508,17 +512,17 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 			var cval interface{}
 			switch col.Name {
 			case "cdc$stream_id":
-				cval = &ci.cdcStreamCols.streamID
+				cval = &ci.cdcChangeBatchCols.streamID
 			case "cdc$time":
-				cval = &ci.cdcStreamCols.time
+				cval = &ci.cdcChangeBatchCols.time
 			case "cdc$batch_seq_no":
-				cval = &ci.cdcChangeCols.batchSeqNo
+				cval = &ci.cdcChangeRowCols.batchSeqNo
 			case "cdc$ttl":
-				cval = &ci.cdcChangeCols.ttl
+				cval = &ci.cdcChangeRowCols.ttl
 			case "cdc$operation":
-				cval = &ci.cdcChangeCols.operation
+				cval = &ci.cdcChangeRowCols.operation
 			case "cdc$end_of_batch":
-				cval = &ci.cdcChangeCols.endOfBatch
+				cval = &ci.cdcChangeRowCols.endOfBatch
 
 			default:
 				if !strings.HasPrefix(col.Name, "cdc$deleted_") {
@@ -539,9 +543,9 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 	return ci, nil
 }
 
-func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
+func (ci *changeRowIterator) Next() (cdcChangeBatchCols, *ChangeRow) {
 	if !ci.iter.Scan(ci.columnValues...) {
-		return cdcStreamCols{}, nil
+		return cdcChangeBatchCols{}, nil
 	}
 
 	// Make a copy so that the Change object can be used safely after Next() is called again
@@ -551,7 +555,7 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 	// TODO: Can we design an interface which scans into user-provided struct?
 	change := &ChangeRow{
 		data:     make(map[string]interface{}, len(ci.columnValues)-6),
-		cdcCols:  ci.cdcChangeCols,
+		cdcCols:  ci.cdcChangeRowCols,
 		colInfos: ci.colInfos,
 	}
 
@@ -603,7 +607,7 @@ func (ci *changeRowIterator) Next() (cdcStreamCols, *ChangeRow) {
 			pos++
 		}
 	}
-	return ci.cdcStreamCols, change
+	return ci.cdcChangeBatchCols, change
 }
 
 func (ci *changeRowIterator) Close() error {

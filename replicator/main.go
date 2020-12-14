@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -81,10 +82,16 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// React to Ctrl+C signal, and stop gracefully after the first signal
-	// Second signal cancels the context, so that the replicator
-	// should stop immediately, but still gracefully
-	// The third signal kills the process
+	// React to Ctrl+C signal.
+	//
+	// 1st signal will cause the replicator to read changes up until
+	// the moment the signal was received, and then it will stop the replicator.
+	// This is the "most graceful" way of stopping the replicator.
+	//
+	// 2nd signal will cancel the context. This should stop all operations
+	// done by the replicator ASAP and stop it.
+	//
+	// 3rd signal will exit the process immediately with error code 1.
 	signalC := make(chan os.Signal)
 	go func() {
 		<-signalC
@@ -335,7 +342,11 @@ func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
 			pos++
 
 		case scylla_cdc.RangeDeleteStartInclusive, scylla_cdc.RangeDeleteStartExclusive:
-			// TODO: Check that we aren't at the end?
+			// Range delete start row should always be followed by a range delete end row.
+			// They should always come in pairs.
+			if pos+2 > len(c.Delta) {
+				return errors.New("invalid change: range delete start row without corresponding end row")
+			}
 			start := change
 			end := c.Delta[pos+1]
 			err = r.processRangeDelete(timestamp, start, end)
@@ -453,11 +464,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 				)
 
 				var vals []interface{}
-				clearTimestamp := timestamp
-				if listChange.AppendedElements != nil {
-					clearTimestamp--
-				}
-				vals = append(vals, clearTimestamp)
+				vals = append(vals, timestamp-1)
 				vals = appendKeyValuesToBind(vals, keyColumns, c)
 				if err := runQuery(deleteStr, vals); err != nil {
 					return err

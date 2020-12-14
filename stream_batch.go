@@ -52,6 +52,7 @@ func newStreamBatchReader(
 func (sbr *streamBatchReader) run(ctx context.Context) error {
 	baseTableName := sbr.keyspaceName + "." + sbr.tableName
 
+	// Retrieve information about progress for each stream in the batch
 	oldProgress := make(map[string]gocql.UUID, len(sbr.streams))
 	for _, stream := range sbr.streams {
 		progress, err := sbr.config.ProgressManager.GetProgress(sbr.generationTime, baseTableName, stream)
@@ -61,12 +62,18 @@ func (sbr *streamBatchReader) run(ctx context.Context) error {
 		oldProgress[string(stream)] = progress.LastProcessedRecordTime
 	}
 
+	// Calculate the minimum cdc$time of each stream in the group.
+	// We will start reading the log from the earliest progress mark,
+	// and will manually skip rows that we already processed in other streams.
 	minTime := oldProgress[string(sbr.streams[0])]
 	for _, progress := range oldProgress {
 		if compareTimeuuid(minTime, progress) > 0 {
 			minTime = progress
 		}
 	}
+
+	// If progress for each stream in the batch was available, start from the minimum.
+	// Otherwise, start from the beginning.
 	if (minTime != gocql.UUID{}) {
 		sbr.lastTimestamp = minTime
 	}
@@ -114,7 +121,7 @@ outer:
 			} else {
 				var change Change
 				for {
-					streamCols, c := iter.Next()
+					changeBatchCols, c := iter.Next()
 					if c == nil {
 						break
 					}
@@ -128,27 +135,24 @@ outer:
 					}
 
 					if c.cdcCols.endOfBatch {
-						// Prevent changes older than the save point from being replayed again
-						if compareTimeuuid(oldProgress[string(change.StreamID)], streamCols.time) < 0 {
-							change.StreamID = streamCols.streamID
-							change.Time = streamCols.time
+						// Since we are reading in batches and we started from the lowest progress mark
+						// of all streams in the batch, we might have to manually filter out changes
+						// from streams that had a save point later than the earliest progress mark
+						if compareTimeuuid(oldProgress[string(change.StreamID)], changeBatchCols.time) < 0 {
+							change.StreamID = changeBatchCols.streamID
+							change.Time = changeBatchCols.time
 							if err := consumer.Consume(change); err != nil {
 								sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
 								return err
 							}
 						} else {
 							sbr.config.Logger.Printf("skipping change due to it being too old (%v <= %v)",
-								streamCols.streamID, oldProgress[string(change.StreamID)].Time())
+								changeBatchCols.streamID, oldProgress[string(change.StreamID)].Time())
 						}
 
 						change.Preimage = nil
 						change.Delta = nil
 						change.Postimage = nil
-
-						// Update the last timestamp only after we processed whole batch
-						if compareTimeuuid(sbr.lastTimestamp, streamCols.time) < 0 {
-							sbr.lastTimestamp = streamCols.time
-						}
 					}
 
 					rowCount++
