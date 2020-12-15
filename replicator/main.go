@@ -50,7 +50,7 @@ func main() {
 	adv := scylla_cdc.AdvancedReaderConfig{
 		ConfidenceWindowSize:   30 * time.Second,
 		ChangeAgeLimit:         24 * time.Hour,
-		QueryTimeWindowSize:    24 * time.Hour,
+		QueryTimeWindowSize:    60 * time.Second,
 		PostEmptyQueryDelay:    30 * time.Second,
 		PostNonEmptyQueryDelay: 10 * time.Second,
 		PostFailedQueryDelay:   1 * time.Second,

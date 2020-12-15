@@ -379,9 +379,10 @@ type changeRowQuerier struct {
 
 	pkCondition string
 	bindArgs    []interface{}
+	consistency gocql.Consistency
 }
 
-func newChangeRowQuerier(session *gocql.Session, streams []StreamID, keyspaceName, tableName string) *changeRowQuerier {
+func newChangeRowQuerier(session *gocql.Session, streams []StreamID, keyspaceName, tableName string, consistency gocql.Consistency) *changeRowQuerier {
 	var pkCondition string
 	if len(streams) == 1 {
 		pkCondition = "\"cdc$stream_id\" = ?"
@@ -401,10 +402,11 @@ func newChangeRowQuerier(session *gocql.Session, streams []StreamID, keyspaceNam
 
 		pkCondition: pkCondition,
 		bindArgs:    bindArgs,
+		consistency: consistency,
 	}
 }
 
-func (crq *changeRowQuerier) queryRange(start gocql.UUID, end gocql.UUID) (*changeRowIterator, error) {
+func (crq *changeRowQuerier) queryRange(start, end gocql.UUID) (*changeRowIterator, error) {
 	// We need metadata to check if there are any tuples
 	kmeta, err := crq.session.KeyspaceMetadata(crq.keyspaceName)
 	if err != nil {
@@ -445,8 +447,39 @@ func (crq *changeRowQuerier) queryRange(start gocql.UUID, end gocql.UUID) (*chan
 	crq.bindArgs[len(crq.bindArgs)-2] = start
 	crq.bindArgs[len(crq.bindArgs)-1] = end
 
-	iter := crq.session.Query(queryStr, crq.bindArgs...).Iter()
+	iter := crq.session.Query(queryStr, crq.bindArgs...).Consistency(crq.consistency).Iter()
 	return newChangeRowIterator(iter, tupleNames)
+}
+
+// For a given range, returns the cdc$time of the earliest rows for each stream.
+func (crq *changeRowQuerier) findFirstRowsInRange(start, end gocql.UUID) (map[string]gocql.UUID, error) {
+	queryStr := fmt.Sprintf(
+		"SELECT \"cdc$stream_id\", \"cdc$time\" FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" <= ? PER PARTITION LIMIT 1 BYPASS CACHE",
+		crq.keyspaceName,
+		crq.tableName,
+		cdcTableSuffix,
+		crq.pkCondition,
+	)
+
+	crq.bindArgs[len(crq.bindArgs)-2] = start
+	crq.bindArgs[len(crq.bindArgs)-1] = end
+
+	ret := make(map[string]gocql.UUID)
+	iter := crq.session.Query(queryStr, crq.bindArgs...).Consistency(crq.consistency).Iter()
+
+	var (
+		streamID StreamID
+		cdcTime  gocql.UUID
+	)
+
+	for iter.Scan(&streamID, &cdcTime) {
+		ret[string(streamID)] = cdcTime
+	}
+
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return ret, nil
 }
 
 // An adapter over gocql.Iterator which chooses representation for row values

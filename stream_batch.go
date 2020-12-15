@@ -71,10 +71,13 @@ func (sbr *streamBatchReader) run(ctx context.Context) error {
 		defer consumer.End()
 	}
 
-	crq := newChangeRowQuerier(sbr.config.Session, sbr.streams, sbr.keyspaceName, sbr.tableName)
+	crq := newChangeRowQuerier(sbr.config.Session, sbr.streams, sbr.keyspaceName, sbr.tableName, sbr.config.Consistency)
 
-	var begin, end gocql.UUID
-	begin, end = sbr.getPollWindow()
+	// It's possible that, when starting, we are in a long period in which nothing happens.
+	// Try to fast forward in the beginning
+	sbr.fastForward(crq)
+
+	wnd := sbr.getPollWindow()
 
 	// sbr.config.Logger.Printf("starting stream processor loop for %v", sbr.streams)
 
@@ -83,9 +86,9 @@ outer:
 		var err error
 		var hadRows bool
 
-		if compareTimeuuid(begin, end) < 0 {
+		if compareTimeuuid(wnd.begin, wnd.end) < 0 {
 			var iter *changeRowIterator
-			iter, err = crq.queryRange(begin, end)
+			iter, err = crq.queryRange(wnd.begin, wnd.end)
 			if err != nil {
 				sbr.config.Logger.Printf("error while sending a query (will retry): %s", err)
 			} else {
@@ -102,9 +105,24 @@ outer:
 			if err == nil {
 				// If there were no errors, then we can safely advance
 				// all streams to the window end
-				sbr.advanceAllStreamsTo(end)
+				sbr.advanceAllStreamsTo(wnd.end)
+
+				if !hadRows && !wnd.touchesConfidenceWindow {
+					// We had an empty poll, and it didn't touch the confidence window.
+					// This means that we are probably still replaying old changes,
+					// and there is a possibility that we encountered a long period
+					// in which there were no changes  (for example, ChangeAgeLimit
+					// was set to 1 day, but we started writing to CDC log one hour ago).
+					//
+					// Look up the next row for each stream in range (now, confidence
+					// window end]. In next poll, we will start reading from the point
+					// that those rows appear
+					sbr.fastForward(crq)
+				}
 			}
 		}
+
+		wnd = sbr.getPollWindow()
 
 		var delay time.Duration
 		if err != nil {
@@ -115,10 +133,9 @@ outer:
 			delay = sbr.config.Advanced.PostEmptyQueryDelay
 		}
 
-		begin, end = sbr.getPollWindow()
 		delayUntil := time.Now().Add(delay)
 
-		if sbr.reachedEndOfTheGeneration(begin) {
+		if sbr.reachedEndOfTheGeneration(wnd.begin) {
 			break outer
 		}
 
@@ -130,7 +147,7 @@ outer:
 			case <-time.After(delayUntil.Sub(time.Now())):
 				break delay
 			case <-sbr.interruptCh:
-				if sbr.reachedEndOfTheGeneration(begin) {
+				if sbr.reachedEndOfTheGeneration(wnd.begin) {
 					break outer
 				}
 			}
@@ -175,8 +192,63 @@ func (sbr *streamBatchReader) advanceAllStreamsTo(point gocql.UUID) {
 	}
 }
 
-func (sbr *streamBatchReader) getPollWindow() (gocql.UUID, gocql.UUID) {
+func (sbr *streamBatchReader) fastForward(crq *changeRowQuerier) {
+	begin := sbr.getPollWindowStart()
+	end := gocql.MinTimeUUID(sbr.getConfidenceLimitPoint())
+
+	nextRowTimePerStream, err := crq.findFirstRowsInRange(begin, end)
+	if err != nil {
+		sbr.config.Logger.Printf("error while trying to skip forward (will ignore): %s", err)
+		return
+	}
+
+	for _, s := range sbr.streams {
+		if nextRowTime, ok := nextRowTimePerStream[string(s)]; ok {
+			// We don't want to skip a row with this timestamp,
+			// therefore subtract a millisecond
+			progress := gocql.MaxTimeUUID(nextRowTime.Time().Add(-time.Millisecond))
+			if compareTimeuuid(sbr.perStreamProgress[string(s)], progress) < 0 {
+				sbr.perStreamProgress[string(s)] = progress
+			}
+		} else {
+			// No row found for this stream - we can skip
+			// right to confidence window end
+			sbr.perStreamProgress[string(s)] = end
+		}
+	}
+}
+
+type pollWindow struct {
+	begin gocql.UUID
+	end   gocql.UUID
+
+	touchesConfidenceWindow bool
+}
+
+func (sbr *streamBatchReader) getPollWindow() pollWindow {
 	// Left range end is the minimum of all progresses of each stream
+	windowStart := sbr.getPollWindowStart()
+
+	// Right range end is the minimum of (left range + query window size, now - confidence window size)
+	queryWindowRightEnd := windowStart.Time().Add(sbr.config.Advanced.QueryTimeWindowSize)
+	confidenceWindowStart := sbr.getConfidenceLimitPoint()
+	if queryWindowRightEnd.Before(confidenceWindowStart) {
+		return pollWindow{
+			begin: windowStart,
+			end:   gocql.MinTimeUUID(queryWindowRightEnd),
+
+			touchesConfidenceWindow: false,
+		}
+	}
+	return pollWindow{
+		begin: windowStart,
+		end:   gocql.MinTimeUUID(confidenceWindowStart),
+
+		touchesConfidenceWindow: true,
+	}
+}
+
+func (sbr *streamBatchReader) getPollWindowStart() gocql.UUID {
 	first := true
 	var windowStart gocql.UUID
 	for _, progress := range sbr.perStreamProgress {
@@ -185,14 +257,11 @@ func (sbr *streamBatchReader) getPollWindow() (gocql.UUID, gocql.UUID) {
 		}
 		first = false
 	}
+	return windowStart
+}
 
-	// Right range end is the minimum of (left range + query window size, now - confidence window size)
-	queryWindowRightEnd := windowStart.Time().Add(sbr.config.Advanced.QueryTimeWindowSize)
-	confidenceWindowStart := time.Now().Add(-sbr.config.Advanced.ConfidenceWindowSize)
-	if queryWindowRightEnd.Before(confidenceWindowStart) {
-		return windowStart, gocql.MinTimeUUID(queryWindowRightEnd)
-	}
-	return windowStart, gocql.MinTimeUUID(confidenceWindowStart)
+func (sbr *streamBatchReader) getConfidenceLimitPoint() time.Time {
+	return time.Now().Add(-sbr.config.Advanced.ConfidenceWindowSize)
 }
 
 func (sbr *streamBatchReader) processRows(iter *changeRowIterator, consumer ChangeConsumer) (int, error) {
