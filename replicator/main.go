@@ -35,7 +35,7 @@ func main() {
 	)
 
 	flag.StringVar(&keyspace, "keyspace", "", "keyspace name")
-	flag.StringVar(&table, "table", "", "table name")
+	flag.StringVar(&table, "table", "", "table name; you can specify multiple table by separating them with a comma")
 	flag.StringVar(&source, "source", "", "address of a node in source cluster")
 	flag.StringVar(&destination, "destination", "", "address of a node in destination cluster")
 	flag.StringVar(&readConsistency, "read-consistency", "", "consistency level used to read from cdc log (one, quorum, all)")
@@ -70,9 +70,15 @@ func main() {
 	fmt.Printf("  Delay after poll with non-empty results: %s\n", adv.PostNonEmptyQueryDelay)
 	fmt.Printf("  Delay after failed poll: %s\n", adv.PostEmptyQueryDelay)
 
+	var fullyQualifiedTables []string
+
+	for _, t := range strings.Split(table, ",") {
+		fullyQualifiedTables = append(fullyQualifiedTables, keyspace+"."+t)
+	}
+
 	reader, rowsRead, err := MakeReplicator(
 		source, destination,
-		[]string{keyspace + "." + table},
+		fullyQualifiedTables,
 		&adv,
 		clRead,
 		clWrite,
