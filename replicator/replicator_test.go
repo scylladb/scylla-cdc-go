@@ -397,6 +397,8 @@ func TestReplicator(t *testing.T) {
 	errC := make(chan error)
 	go func() { errC <- replicator.Run(ctx) }()
 
+	time.Sleep(time.Second)
+
 	replicator.StopAt(time.Now().Add(time.Second))
 	if err := <-errC; err != nil {
 		t.Fatal(err)

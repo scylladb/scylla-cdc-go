@@ -280,6 +280,8 @@ func TestTypes(t *testing.T) {
 	errC := make(chan error)
 	go func() { errC <- reader.Run(context.Background()) }()
 
+	time.Sleep(time.Second)
+
 	reader.StopAt(time.Now().Add(time.Second))
 
 	if err := <-errC; err != nil {

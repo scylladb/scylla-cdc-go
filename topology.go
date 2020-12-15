@@ -3,7 +3,6 @@ package scylla_cdc
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sort"
 	"time"
 
@@ -31,24 +30,26 @@ type generation struct {
 
 type StreamID []byte
 
-type generationList []*generation
+type timeList []time.Time
 
-func (gl generationList) Len() int {
-	return len(gl)
+func (tl timeList) Len() int {
+	return len(tl)
 }
 
-func (gl generationList) Less(i, j int) bool {
-	return gl[i].startTime.Before(gl[j].startTime)
+func (tl timeList) Less(i, j int) bool {
+	return tl[i].Before(tl[j])
 }
 
-func (gl generationList) Swap(i, j int) {
-	gl[i], gl[j] = gl[j], gl[i]
+func (tl timeList) Swap(i, j int) {
+	tl[i], tl[j] = tl[j], tl[i]
 }
 
 type generationFetcher struct {
 	session  *gocql.Session
 	lastTime time.Time
 	logger   Logger
+
+	pushedFirst bool
 
 	generationCh chan *generation
 	refreshCh    chan struct{}
@@ -75,45 +76,15 @@ func newGenerationFetcher(
 func (gf *generationFetcher) Run(ctx context.Context) error {
 	l := gf.logger
 
-	queryGensUpToTime := gf.session.Query(fmt.Sprintf("SELECT time, streams FROM %s WHERE time <= ? ALLOW FILTERING", generationsTableName))
-	queryGensAfterTime := gf.session.Query(fmt.Sprintf("SELECT time, streams FROM %s WHERE time > ? ALLOW FILTERING", generationsTableName))
-
-	// Find the generation which contains the timestamp from which we should
-	// start reading
-	gl, err := gf.fetchFromGenerationsTable(queryGensUpToTime, gf.lastTime)
-	if err != nil {
-		close(gf.generationCh)
-		return err
-	}
-
-	if len(gl) > 0 {
-		first := gl[len(gl)-1]
-
-		gf.logger.Printf("pushing generation %v", first.startTime)
-		gf.generationCh <- first
-		gf.lastTime = first.startTime
-	}
-
-	// Periodically poll for newer generations
 	l.Printf("starting generation fetcher loop")
+
 outer:
 	for {
 		// Generation processing can take some time, so start calculating
 		// the next poll time starting from now
 		waitC := time.After(generationFetchPeriod)
 
-		// See if there are any new generations
-		gl, err := gf.fetchFromGenerationsTable(queryGensAfterTime, gf.lastTime)
-		if err != nil {
-			l.Printf("an error occurred while trying to fetch new generations: %v", err)
-		} else {
-			// Push generations that we fetched to generationCh
-			for _, g := range gl {
-				if shouldStop := gf.pushGeneration(g); shouldStop {
-					break
-				}
-			}
-		}
+		gf.tryFetchGenerations()
 
 		select {
 		// Give priority to the stop channel and the context
@@ -138,6 +109,82 @@ outer:
 	return nil
 }
 
+func (gf *generationFetcher) tryFetchGenerations() {
+	// Decide on the consistency to use
+	size, err := gf.getClusterSize()
+	if err != nil {
+		gf.logger.Printf("an error occurred while determining cluster size: %s", err)
+		return
+	}
+
+	consistency := gocql.One
+	if size == 2 {
+		consistency = gocql.Quorum
+	} else if size >= 3 {
+		consistency = gocql.All
+	}
+
+	// Fetch some generation times
+	times, err := gf.getGenerationTimes(consistency)
+	if err != nil {
+		gf.logger.Printf("an error occured while fetching generation times: %s", err)
+		return
+	}
+	sort.Sort(timeList(times))
+
+	fetchAndPush := func(t time.Time) (shouldBreak bool) {
+		streams, err := gf.getGeneration(t, consistency)
+		if err != nil {
+			gf.logger.Printf("an error occured while fetching generation streams for %s: %s", t, err)
+			return true
+		}
+		gen := &generation{t, streams}
+		if shouldStop := gf.pushGeneration(gen); shouldStop {
+			return true
+		}
+		return false
+	}
+
+	gf.logger.Printf("poll returned %d generations", len(times))
+
+	var prevTime time.Time
+
+	maybePushFirst := func() bool {
+		if !prevTime.IsZero() {
+			if shouldBreak := fetchAndPush(prevTime); shouldBreak {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, t := range times {
+		if gf.lastTime.Before(t) {
+			if !gf.pushedFirst {
+				// When we start, we need to push the generation that is being
+				// currently open. If we are here, then it means we arrived
+				// at the timestamp of the first generation which is after
+				// the timestamp from which we wish to start replicating.
+				// We need to push the previous generation first.
+				// If there was no previous generation, then it probably means
+				// that the generation we arrived at is the very first generation
+				// in the cluster
+				if shouldBreak := maybePushFirst(); shouldBreak {
+					return
+				}
+				gf.pushedFirst = true
+			}
+			if shouldBreak := fetchAndPush(t); shouldBreak {
+				return
+			}
+			gf.lastTime = t
+		}
+		prevTime = t
+	}
+
+	_ = maybePushFirst()
+}
+
 func (gf *generationFetcher) Get(ctx context.Context) (*generation, error) {
 	select {
 	case <-ctx.Done():
@@ -158,46 +205,6 @@ func (gf *generationFetcher) TriggerRefresh() {
 	}
 }
 
-func (gf *generationFetcher) fetchFromGenerationsTable(
-	query *gocql.Query,
-	timePoint time.Time,
-) ([]*generation, error) {
-	// Decide on the consistency to use
-	size, err := gf.getClusterSize()
-	if err != nil {
-		return nil, err
-	}
-
-	consistency := gocql.One
-	if size == 2 {
-		consistency = gocql.Quorum
-	} else if size >= 3 {
-		consistency = gocql.All
-	}
-
-	iter := query.Consistency(consistency).Bind(timePoint).Iter()
-
-	var gl generationList
-	for {
-		gen := &generation{}
-		if !iter.Scan(&gen.startTime, &gen.streams) {
-			break
-		}
-		gl = append(gl, gen)
-	}
-	if err := iter.Close(); err != nil {
-		gf.logger.Printf("an error occured while fetching generations: %s", err)
-		return nil, err
-	}
-
-	if len(gl) > 0 {
-		gf.logger.Printf("poll returned %d generations", len(gl))
-	}
-
-	sort.Sort(gl)
-	return gl, nil
-}
-
 func (gf *generationFetcher) pushGeneration(gen *generation) (shouldStop bool) {
 	gf.logger.Printf("pushing generation %v", gen.startTime)
 	select {
@@ -207,6 +214,34 @@ func (gf *generationFetcher) pushGeneration(gen *generation) (shouldStop bool) {
 		gf.lastTime = gen.startTime
 		return false
 	}
+}
+
+func (gf *generationFetcher) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+	var streams []StreamID
+	err := gf.session.Query("SELECT streams FROM "+generationsTableName+" WHERE time = ?", genTime).
+		Consistency(consistency).
+		Scan(&streams)
+	if err != nil {
+		return nil, err
+	}
+	return streams, err
+}
+
+func (gf *generationFetcher) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
+	iter := gf.session.Query("SELECT time FROM " + generationsTableName).
+		Consistency(consistency).
+		Iter()
+	var (
+		times    []time.Time
+		currTime time.Time
+	)
+	for iter.Scan(&currTime) {
+		times = append(times, currTime)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return times, nil
 }
 
 // Unfortunately, gocql does not expose information about the cluster,
