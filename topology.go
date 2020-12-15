@@ -10,7 +10,6 @@ import (
 )
 
 var (
-	ErrNoGenerationsTable   = errors.New("cluster does not have a known table to read CDC generations from")
 	ErrNoGenerationsPresent = errors.New("there are no generations present")
 )
 
@@ -145,35 +144,35 @@ func (gf *generationFetcher) tryFetchGenerations() {
 		return false
 	}
 
-	gf.logger.Printf("poll returned %d generations", len(times))
-
 	var prevTime time.Time
 
 	maybePushFirst := func() bool {
-		if !prevTime.IsZero() {
-			if shouldBreak := fetchAndPush(prevTime); shouldBreak {
-				return true
+		if !gf.pushedFirst {
+			// When we start, we need to push the generation that is being
+			// currently open. If we are here, then it means we arrived
+			// at the timestamp of the first generation which is after
+			// the timestamp from which we wish to start replicating.
+			// We need to push the previous generation first.
+			// If there was no previous generation, then it probably means
+			// that the generation we arrived at is the very first generation
+			// in the cluster
+			if !prevTime.IsZero() {
+				if shouldBreak := fetchAndPush(prevTime); shouldBreak {
+					return true
+				}
 			}
+			gf.pushedFirst = true
 		}
 		return false
 	}
 
 	for _, t := range times {
 		if gf.lastTime.Before(t) {
-			if !gf.pushedFirst {
-				// When we start, we need to push the generation that is being
-				// currently open. If we are here, then it means we arrived
-				// at the timestamp of the first generation which is after
-				// the timestamp from which we wish to start replicating.
-				// We need to push the previous generation first.
-				// If there was no previous generation, then it probably means
-				// that the generation we arrived at is the very first generation
-				// in the cluster
-				if shouldBreak := maybePushFirst(); shouldBreak {
-					return
-				}
-				gf.pushedFirst = true
+
+			if shouldBreak := maybePushFirst(); shouldBreak {
+				return
 			}
+
 			if shouldBreak := fetchAndPush(t); shouldBreak {
 				return
 			}

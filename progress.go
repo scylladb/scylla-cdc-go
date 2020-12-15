@@ -10,7 +10,7 @@ import (
 type ProgressReporter interface {
 	// MarkProgress saves information about the last successfully processed
 	// cdc log record. If the reader is restarted, it should resume reading
-	// from this shard starting after the last marked position.
+	// from this stream starting after the last marked position.
 	MarkProgress(progress Progress) error
 }
 
@@ -24,13 +24,14 @@ type ProgressManager interface {
 	// should start processing the next generation.
 	StartGeneration(gen time.Time) error
 
-	// GetProgress retrieves information about the progress of given shard,
-	// in a given table.
+	// GetProgress retrieves information about the progress of given stream,
+	// in a given table. It can return zero value for Progress if there was
+	// no information about the stream
 	GetProgress(gen time.Time, table string, streamID StreamID) (Progress, error)
 
 	// SaveProgress stores information about the last cdc log record which was
 	// processed successfully. If the reader is restarted, it should resume
-	// work for this shard from the last saved
+	// work for this stream from the last saved
 	SaveProgress(gen time.Time, table string, streamID StreamID, progress Progress) error
 }
 
@@ -62,7 +63,7 @@ type TableBackedProgressManager struct {
 	session           *gocql.Session
 	progressTableName string
 
-	// TTL to use when writing progress for a shard (a week by default).
+	// TTL to use when writing progress for a stream (a week by default).
 	// TODO: maybe not? maybe we should clean up this data manually?
 	// Progress data may be large if generations are very large
 	ttl int32

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
 	"reflect"
@@ -871,9 +872,11 @@ func tryWithExponentialBackoff(f func() error) error {
 		log.Printf("ERROR (try #%d): %s", i+1, err)
 		i++
 
-		// TODO: Add some random variation to the retries
 		<-time.After(dur)
-		dur *= 2
+
+		// Increase backoff duration randomly - between 2 to 3 times
+		factor := 2.0 + rand.Float64()*3.0
+		dur = time.Duration(float64(dur) * factor)
 		if dur > maxWaitBetweenRetries {
 			dur = maxWaitBetweenRetries
 		}
