@@ -474,7 +474,7 @@ func createSessionAndSetupSchema(t *testing.T, addr string, withCdc bool, schema
 	for _, tbl := range schemas {
 		tblQuery := tbl
 		if withCdc {
-			tblQuery += " WITH cdc = {'enabled': true}"
+			tblQuery += " WITH cdc = {'enabled': true, 'preimage': true, 'postimage': true}"
 		}
 		execQuery(t, session, tblQuery)
 	}

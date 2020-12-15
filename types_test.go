@@ -249,7 +249,7 @@ func TestTypes(t *testing.T) {
 	execQuery(t, session, "CREATE TYPE ks.udt (a int, b text)")
 
 	for _, tc := range typesTestCases {
-		execQuery(t, session, fmt.Sprintf(tc.schema, tc.tableName)+" with cdc = {'enabled': true}")
+		execQuery(t, session, fmt.Sprintf(tc.schema, tc.tableName)+" WITH cdc = {'enabled': true, 'preimage': true, 'postimage': true}")
 
 		for _, stmt := range tc.stmts {
 			execQuery(t, session, fmt.Sprintf(stmt, tc.tableName))

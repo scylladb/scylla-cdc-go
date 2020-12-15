@@ -449,7 +449,51 @@ func (crq *changeRowQuerier) queryRange(start gocql.UUID, end gocql.UUID) (*chan
 	return newChangeRowIterator(iter, tupleNames)
 }
 
-// An adapter over gocql.Iterator
+// An adapter over gocql.Iterator which chooses representation for row values
+// which is more suitable for CDC than the default one.
+//
+// Gocql has two main methods of retrieving row data:
+//
+// - If you know what columns will be returned by the query and which types
+//   to use to represent them, you use (*Iter).Scan(...) function and pass
+//   a list of pointers to values of types you chose for the representation.
+//   For example, if `x` is int, `Scan(&x)` will put the value of the column
+//   directly to the `x` variable, setting it to 0 if the column was null.
+// - If you don't know which columns will be returned and what are their
+//   types, you can use (*Iter).MapScan, which returns a map from column
+//   name to the column value. Gocql automatically chooses a type which
+//   will be used to represent the column value.
+//
+// In our interface, we would like to use an API like MapScan, but there
+// are some problems which are addressed by changeRowIterator:
+//
+// - Gocql's choice of the type used to represent column values is not the best
+//   for CDC use case. First and foremost, it's very important to differentiate
+//   Go's default value for a type from a null. For example, for int columns,
+//   MapScan chooses Go's int type, and sets it to 0 in both cases if it was 0
+//   or null in the table. For CDC, this means completely different things -
+//   0 would mean that the 0 value was written to that column, while null would
+//   mean that this column value was not changed.
+//   Fortunately, we can solve this issue by using a pointer-to-type (e.g. *int).
+//   Gocql will set it to null if it was null in the database, and set it
+//   to a pointer to a proper value if it was not null.
+//
+// - Similarly to above, UDTs suffer from a similar problem - they are,
+//   by default, represented by a map[string]interface{} which holds non-pointer
+//   values of UDT's elements. Fortunately, we can provide a custom type
+//   which uses pointers to UDT's elements - see udtWithNulls.
+//
+// - Tuples are handled in a peculiar way - instead of returning, for example,
+//   an []interface{} which holds tuple values, Scan expects that a pointer
+//   for each tuple element will be provided, and MapScan puts each tuple
+//   element under a separate key in the map. This creates a problem - it's
+//   impossible to differentiate a tuple with all fields set to null, and
+//   a tuple that is just a null. In CDC, the first means an overwrite of the
+//   column, and the second means that the column should not be changed.
+//   This is worked around by using the writetime(X) function on the tuple
+//   column - this function returns null iff column X was null.
+//   Moreover, tuples are represented as an []interface{} slice containing
+//   pointers to tuple elements.
 type changeRowIterator struct {
 	iter         *gocql.Iter
 	columnValues []interface{}
@@ -457,7 +501,9 @@ type changeRowIterator struct {
 	cdcChangeBatchCols cdcChangeBatchCols
 	cdcChangeRowCols   cdcChangeRowCols
 
-	colInfos        []gocql.ColumnInfo
+	colInfos []gocql.ColumnInfo
+
+	// Maps from tuple column names to the index they occupy in columnValues
 	tupleNameToIdx  map[string]int
 	tupleWriteTimes []int64
 }
@@ -476,6 +522,14 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 		return nil, iter.Close()
 	}
 
+	// If there are tuples in the table, the query will have form
+	//   SELECT writetime(X), writetime(Z), X, Y, Z FROM ...
+	// where X and Z are tuples.
+	// We need to get the writetime for tuples in order to work around
+	// an issue in gocql - otherwise we wouldn't be able to differentiate
+	// a tuple with all columns null, and a tuple which is null itself.
+
+	// Assign slots in the beginning for tuples' writetime
 	tupleNameToIdx := make(map[string]int, len(tupleNames))
 	for i, name := range tupleNames {
 		tupleNameToIdx[name] = i
@@ -490,26 +544,31 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 		tupleWriteTimes: make([]int64, len(tupleNames)),
 	}
 
+	// tupleWriteTimes will receive results of the writetime function
+	// for each tuple column
 	for i := range tupleNames {
 		ci.columnValues = append(ci.columnValues, &ci.tupleWriteTimes[i])
 	}
 
-	colNames := make([]string, 0)
-	for _, col := range allCols {
-		colNames = append(colNames, col.Name)
-	}
-
 	for _, col := range allCols[len(tupleNames):] {
 		if !strings.HasPrefix(col.Name, "cdc$") {
+			// colInfos will only have information about non-cdc-specific columns
 			ci.colInfos = append(ci.colInfos, col)
 		}
 
 		if tupTyp, ok := col.TypeInfo.(gocql.TupleTypeInfo); ok {
+			// Gocql operates on "flattened" tuples, therefore we need to put
+			// a separate value for each tuple element.
+			// To represent a field, use value returned by gocql's TypeInfo.New(),
+			// but convert it into a pointer
 			for _, el := range tupTyp.Elems {
 				ci.columnValues = append(ci.columnValues, reflect.New(reflect.TypeOf(el.New())).Interface())
 			}
 		} else {
 			var cval interface{}
+
+			// For common cdc column names, we want their values to be placed
+			// in cdcChangeBatchCols and cdcChangeRowCols structures
 			switch col.Name {
 			case "cdc$stream_id":
 				cval = &ci.cdcChangeBatchCols.streamID
@@ -527,12 +586,18 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 			default:
 				if !strings.HasPrefix(col.Name, "cdc$deleted_") {
 					if col.TypeInfo.Type() == gocql.TypeUDT {
+						// For UDT fields, use udtWithNulls. It wraps
+						// a map[string]interface{} and for each its field,
+						// it keeps a pointer-to-value instead of keeping
+						// a value directly.
 						cval = new(udtWithNulls)
 					} else {
 						// All non-cdc fields should be nullable
 						cval = reflect.New(reflect.TypeOf(col.TypeInfo.New())).Interface()
 					}
 				} else {
+					// For cdc$deleted_X and cdc$deleted_elements_X, we can use
+					// the type that gocql chooses for us
 					cval = col.TypeInfo.New()
 				}
 			}
@@ -548,18 +613,14 @@ func (ci *changeRowIterator) Next() (cdcChangeBatchCols, *ChangeRow) {
 		return cdcChangeBatchCols{}, nil
 	}
 
-	// Make a copy so that the Change object can be used safely after Next() is called again
-	// TODO: Maybe we can omit copying here? We could re-use a single map
-	// But it would require entrusting the user with performing a necessary copy
-	// if they want to preserve data across Next() calls
-	// TODO: Can we design an interface which scans into user-provided struct?
 	change := &ChangeRow{
 		data:     make(map[string]interface{}, len(ci.columnValues)-6),
 		cdcCols:  ci.cdcChangeRowCols,
 		colInfos: ci.colInfos,
 	}
 
-	// At the beginning, there are writetime()
+	// Beginning of tupleWriteTimes contains
+	// At the beginning, there are writetime() for tuples. Skip them
 	pos := len(ci.tupleWriteTimes)
 	for _, col := range ci.iter.Columns()[len(ci.tupleWriteTimes):] {
 		// TODO: Optimize
@@ -625,6 +686,9 @@ func maybeDereferenceTwice(i interface{}) (interface{}, bool) {
 	return reflect.Indirect(v).Interface(), true
 }
 
+// Converts a v1 UUID to a Cassandra timestamp.
+// UUID timestamp is measured in 100-nanosecond intervals since 00:00:00.00, 15 October 1582.
+// Cassandra timestamp is measured in milliseconds since 00:00:00.00, 1 January 1970.
 func timeuuidToTimestamp(from gocql.UUID) int64 {
 	return (from.Timestamp() - 0x01b21dd213814000) / 10
 }

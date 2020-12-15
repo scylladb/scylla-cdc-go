@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,7 +20,7 @@ import (
 
 // TODO: Escape field names?
 
-var showTimestamps = true
+var showTimestamps = false
 var debugQueries = false
 var maxWaitBetweenRetries = 5 * time.Second
 
@@ -211,7 +212,7 @@ func (rf *replicatorFactory) CreateChangeConsumer(input scylla_cdc.CreateChangeC
 		return nil, fmt.Errorf("table %s does not exist", input.TableName)
 	}
 
-	return NewDeltaReplicator(rf.destinationSession, kmeta, tmeta, rf.consistency, rf.rowsRead)
+	return NewDeltaReplicator(rf.destinationSession, kmeta, tmeta, rf.consistency, rf.rowsRead, input.StreamIDs)
 }
 
 type DeltaReplicator struct {
@@ -231,6 +232,8 @@ type DeltaReplicator struct {
 
 	localCount int64
 	totalCount *int64
+
+	streamIDs []scylla_cdc.StreamID
 }
 
 type updateQuerySet struct {
@@ -243,7 +246,7 @@ type udtInfo struct {
 	fields      []string
 }
 
-func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, meta *gocql.TableMetadata, consistency gocql.Consistency, count *int64) (*DeltaReplicator, error) {
+func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, meta *gocql.TableMetadata, consistency gocql.Consistency, count *int64, streamIDs []scylla_cdc.StreamID) (*DeltaReplicator, error) {
 	var (
 		pkColumns    []string
 		ckColumns    []string
@@ -280,6 +283,8 @@ func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, m
 		allColumns:   append(append(append([]string{}, otherColumns...), pkColumns...), ckColumns...),
 
 		totalCount: count,
+
+		streamIDs: streamIDs,
 	}
 
 	dr.precomputeQueries()
@@ -367,7 +372,11 @@ func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
 }
 
 func (r *DeltaReplicator) End() {
-	// TODO: Take a snapshot here
+	var hexStreams []string
+	for _, id := range r.streamIDs {
+		hexStreams = append(hexStreams, hex.EncodeToString(id))
+	}
+	log.Printf("Streams [%s]: processed %d changes in total", strings.Join(hexStreams, ", "), r.localCount)
 	atomic.AddInt64(r.totalCount, r.localCount)
 }
 
@@ -863,6 +872,4 @@ func tryWithExponentialBackoff(f func() error) error {
 			dur = maxWaitBetweenRetries
 		}
 	}
-
-	return err
 }
