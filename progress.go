@@ -9,13 +9,6 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-type ProgressReporter interface {
-	// MarkProgress saves information about the last successfully processed
-	// cdc log record. If the reader is restarted, it should resume reading
-	// from this stream starting after the last marked position.
-	MarkProgress(ctx context.Context, progress Progress) error
-}
-
 type ProgressManager interface {
 	// GetCurrentGenerationTime returns the time of the generation that was
 	// saved as being currently processed. If there was no such information
@@ -35,6 +28,17 @@ type ProgressManager interface {
 	// processed successfully. If the reader is restarted, it should resume
 	// work for this stream from the last saved
 	SaveProgress(ctx context.Context, gen time.Time, table string, streamID StreamID, progress Progress) error
+}
+
+type ProgressReporter struct {
+	progressManager ProgressManager
+	gen             time.Time
+	tableName       string
+	streamID        StreamID
+}
+
+func (pr *ProgressReporter) MarkProgress(ctx context.Context, progress Progress) error {
+	return pr.progressManager.SaveProgress(ctx, pr.gen, pr.tableName, pr.streamID, progress)
 }
 
 type Progress struct {
@@ -152,14 +156,3 @@ func (tbpm *TableBackedProgressManager) SaveProgress(ctx context.Context, gen ti
 }
 
 var _ ProgressManager = (*TableBackedProgressManager)(nil)
-
-type tableAndStreamProgressReporter struct {
-	progressManager ProgressManager
-	gen             time.Time
-	tableName       string
-	streamID        StreamID
-}
-
-func (taspr *tableAndStreamProgressReporter) MarkProgress(ctx context.Context, progress Progress) error {
-	return taspr.progressManager.SaveProgress(ctx, taspr.gen, taspr.tableName, taspr.streamID, progress)
-}

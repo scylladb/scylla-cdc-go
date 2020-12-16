@@ -363,6 +363,8 @@ func (c *ChangeRow) String() string {
 type CreateChangeConsumerInput struct {
 	TableName string
 	StreamID  StreamID
+
+	ProgressReporter *ProgressReporter
 }
 
 type ChangeConsumerFactory interface {

@@ -2,7 +2,6 @@ package scylla_cdc
 
 import (
 	"context"
-	"encoding/base64"
 	"sync/atomic"
 	"time"
 
@@ -70,6 +69,13 @@ func (sbr *streamBatchReader) run(ctx context.Context) (err error) {
 		input := CreateChangeConsumerInput{
 			TableName: sbr.getBaseTableName(),
 			StreamID:  s,
+
+			ProgressReporter: &ProgressReporter{
+				progressManager: sbr.config.ProgressManager,
+				gen:             sbr.generationTime,
+				tableName:       sbr.getBaseTableName(),
+				streamID:        s,
+			},
 		}
 		consumer, err := sbr.config.ChangeConsumerFactory.CreateChangeConsumer(ctx, input)
 		if err != nil {
@@ -160,17 +166,6 @@ outer:
 		}
 	}
 
-	baseTableName := sbr.getBaseTableName()
-	for _, stream := range sbr.streams {
-		if err := sbr.config.ProgressManager.SaveProgress(ctx, sbr.generationTime, baseTableName, stream, Progress{sbr.lastTimestamp}); err != nil {
-			// TODO: Should this be a hard error?
-			sbr.config.Logger.Printf("error while trying to save progress for table %s, stream %v: %s", baseTableName, stream, err)
-		} else {
-			sbr.config.Logger.Printf("saved progress for stream %s at %v", base64.StdEncoding.EncodeToString(stream), sbr.lastTimestamp.Time())
-		}
-	}
-
-	// sbr.config.Logger.Printf("successfully finishing stream processor loop for %v", sbr.streams)
 	return nil
 }
 

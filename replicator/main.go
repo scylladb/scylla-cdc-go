@@ -25,6 +25,8 @@ var showTimestamps = false
 var debugQueries = false
 var maxWaitBetweenRetries = 5 * time.Second
 
+var reportPeriod = 1 * time.Minute
+
 func main() {
 	var (
 		keyspace         string
@@ -261,7 +263,7 @@ func (rf *replicatorFactory) CreateChangeConsumer(
 		return nil, fmt.Errorf("table %s does not exist", input.TableName)
 	}
 
-	return NewDeltaReplicator(rf.destinationSession, kmeta, tmeta, rf.consistency, rf.rowsRead, input.StreamID)
+	return NewDeltaReplicator(ctx, rf.destinationSession, kmeta, tmeta, rf.consistency, rf.rowsRead, input.StreamID, input.ProgressReporter)
 }
 
 type DeltaReplicator struct {
@@ -283,6 +285,7 @@ type DeltaReplicator struct {
 	totalCount *int64
 
 	streamID scylla_cdc.StreamID
+	reporter *scylla_cdc.PeriodicProgressReporter
 }
 
 type updateQuerySet struct {
@@ -296,12 +299,14 @@ type udtInfo struct {
 }
 
 func NewDeltaReplicator(
+	ctx context.Context,
 	session *gocql.Session,
 	kmeta *gocql.KeyspaceMetadata,
 	meta *gocql.TableMetadata,
 	consistency gocql.Consistency,
 	count *int64,
 	streamID scylla_cdc.StreamID,
+	reporter *scylla_cdc.ProgressReporter,
 ) (*DeltaReplicator, error) {
 	var (
 		pkColumns    []string
@@ -341,10 +346,12 @@ func NewDeltaReplicator(
 		totalCount: count,
 
 		streamID: streamID,
+		reporter: scylla_cdc.NewPeriodicProgressReporter(reportPeriod, reporter),
 	}
 
 	dr.precomputeQueries()
 
+	dr.reporter.Start(ctx)
 	return dr, nil
 }
 
@@ -430,6 +437,7 @@ func (r *DeltaReplicator) Consume(ctx context.Context, c scylla_cdc.Change) erro
 		}
 	}
 
+	r.reporter.Update(c.Time)
 	r.localCount += int64(len(c.Delta))
 
 	return nil
@@ -438,6 +446,7 @@ func (r *DeltaReplicator) Consume(ctx context.Context, c scylla_cdc.Change) erro
 func (r *DeltaReplicator) End() error {
 	log.Printf("Streams [%s]: processed %d changes in total", hex.EncodeToString(r.streamID), r.localCount)
 	atomic.AddInt64(r.totalCount, r.localCount)
+	_ = r.reporter.SaveAndStop(context.Background())
 	return nil
 }
 
