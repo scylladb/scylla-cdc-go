@@ -1,10 +1,12 @@
 package scylla_cdc
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/gocql/gocql"
+	"golang.org/x/sync/semaphore"
 )
 
 type ProgressReporter interface {
@@ -67,6 +69,8 @@ type TableBackedProgressManager struct {
 	// TODO: maybe not? maybe we should clean up this data manually?
 	// Progress data may be large if generations are very large
 	ttl int32
+
+	concurrentQueryLimiter *semaphore.Weighted
 }
 
 func NewTableBackedProgressManager(session *gocql.Session, progressTableName string) (*TableBackedProgressManager, error) {
@@ -75,6 +79,8 @@ func NewTableBackedProgressManager(session *gocql.Session, progressTableName str
 		progressTableName: progressTableName,
 
 		ttl: 7 * 24 * 60 * 60, // 1 week
+
+		concurrentQueryLimiter: semaphore.NewWeighted(100), // TODO: Make units configurable
 	}
 
 	if err := tbpm.ensureTableExists(); err != nil {
@@ -120,6 +126,9 @@ func (tbpm *TableBackedProgressManager) StartGeneration(gen time.Time) error {
 }
 
 func (tbpm *TableBackedProgressManager) GetProgress(gen time.Time, tableName string, streamID StreamID) (Progress, error) {
+	tbpm.concurrentQueryLimiter.Acquire(context.TODO(), 1)
+	defer tbpm.concurrentQueryLimiter.Release(1)
+
 	var timestamp gocql.UUID
 	err := tbpm.session.Query(
 		fmt.Sprintf("SELECT last_timestamp FROM %s WHERE generation = ? AND table_name = ? AND stream_id = ?", tbpm.progressTableName),
@@ -133,6 +142,9 @@ func (tbpm *TableBackedProgressManager) GetProgress(gen time.Time, tableName str
 }
 
 func (tbpm *TableBackedProgressManager) SaveProgress(gen time.Time, tableName string, streamID StreamID, progress Progress) error {
+	tbpm.concurrentQueryLimiter.Acquire(context.TODO(), 1)
+	defer tbpm.concurrentQueryLimiter.Release(1)
+
 	return tbpm.session.Query(
 		fmt.Sprintf("INSERT INTO %s (generation, table_name, stream_id, last_timestamp) VALUES (?, ?, ?, ?) USING TTL ?", tbpm.progressTableName),
 		gen, tableName, streamID, progress.LastProcessedRecordTime, tbpm.ttl,

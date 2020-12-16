@@ -10,7 +10,6 @@ import (
 
 	"github.com/gocql/gocql"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/semaphore"
 )
 
 type ReaderConfig struct {
@@ -99,8 +98,6 @@ type Reader struct {
 	readFrom   time.Time
 	stoppedCh  chan struct{}
 	stopTime   atomic.Value
-
-	saveLimiter *semaphore.Weighted
 }
 
 // Creates a new CDC reader.
@@ -138,8 +135,6 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 		genFetcher: genFetcher,
 		readFrom:   readFrom,
 		stoppedCh:  make(chan struct{}),
-
-		saveLimiter: semaphore.NewWeighted(100),
 	}
 	return reader, nil
 }
@@ -199,7 +194,6 @@ func (r *Reader) Run(ctx context.Context) error {
 						splitName[0],
 						splitName[1],
 						gocql.MinTimeUUID(r.readFrom),
-						r.saveLimiter,
 					))
 				}
 			}

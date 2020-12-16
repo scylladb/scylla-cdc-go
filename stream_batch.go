@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
-	"golang.org/x/sync/semaphore"
 )
 
 type streamBatchReader struct {
@@ -22,8 +21,6 @@ type streamBatchReader struct {
 
 	perStreamProgress map[string]gocql.UUID
 
-	saveLimiter *semaphore.Weighted
-
 	interruptCh chan struct{}
 }
 
@@ -34,7 +31,6 @@ func newStreamBatchReader(
 	keyspaceName string,
 	tableName string,
 	startFrom gocql.UUID,
-	saveRateLimiter *semaphore.Weighted,
 ) *streamBatchReader {
 	return &streamBatchReader{
 		config:         config,
@@ -44,8 +40,6 @@ func newStreamBatchReader(
 		tableName:      tableName,
 
 		lastTimestamp: startFrom,
-
-		saveLimiter: saveRateLimiter,
 
 		perStreamProgress: make(map[string]gocql.UUID, len(streams)),
 
@@ -154,8 +148,6 @@ outer:
 		}
 	}
 
-	sbr.saveLimiter.Acquire(ctx, 1)
-	defer sbr.saveLimiter.Release(1)
 	baseTableName := sbr.getBaseTableName()
 	for _, stream := range sbr.streams {
 		if err := sbr.config.ProgressManager.SaveProgress(sbr.generationTime, baseTableName, stream, Progress{sbr.lastTimestamp}); err != nil {
