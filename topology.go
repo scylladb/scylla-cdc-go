@@ -2,6 +2,7 @@ package scylla_cdc
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"time"
@@ -28,6 +29,10 @@ type generation struct {
 }
 
 type StreamID []byte
+
+func (sid StreamID) String() string {
+	return hex.EncodeToString(sid)
+}
 
 type timeList []time.Time
 

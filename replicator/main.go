@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -444,7 +443,7 @@ func (r *DeltaReplicator) Consume(ctx context.Context, c scylla_cdc.Change) erro
 }
 
 func (r *DeltaReplicator) End() error {
-	log.Printf("Streams [%s]: processed %d changes in total", hex.EncodeToString(r.streamID), r.localCount)
+	log.Printf("Streams [%s]: processed %d changes in total", r.streamID, r.localCount)
 	atomic.AddInt64(r.totalCount, r.localCount)
 	_ = r.reporter.SaveAndStop(context.Background())
 	return nil

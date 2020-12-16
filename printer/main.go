@@ -65,7 +65,7 @@ func main() {
 }
 
 func printerConsumer(ctx context.Context, tableName string, c scylla_cdc.Change) error {
-	fmt.Printf("[%s %s]:\n", hex.EncodeToString(c.StreamID), c.Time.String())
+	fmt.Printf("[%s %s]:\n", c.StreamID, c.Time.String())
 	if len(c.Preimage) > 0 {
 		fmt.Println("  PREIMAGE:")
 		for _, r := range c.Preimage {
