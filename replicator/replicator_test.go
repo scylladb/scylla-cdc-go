@@ -389,7 +389,16 @@ func TestReplicator(t *testing.T) {
 	}
 
 	logger := log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
-	replicator, err := newReplicator(sourceAddress, destinationAddress, schemaNames, &adv, gocql.Quorum, gocql.Quorum, logger)
+	replicator, err := newReplicator(
+		context.Background(),
+		sourceAddress,
+		destinationAddress,
+		schemaNames,
+		&adv, gocql.Quorum,
+		gocql.Quorum,
+		logger,
+	)
+
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -42,7 +42,7 @@ func main() {
 	)
 	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
-	reader, err := scylla_cdc.NewReader(cfg)
+	reader, err := scylla_cdc.NewReader(context.Background(), cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func main() {
 	}
 }
 
-func printerConsumer(tableName string, c scylla_cdc.Change) error {
+func printerConsumer(ctx context.Context, tableName string, c scylla_cdc.Change) error {
 	fmt.Printf("[%s %s]:\n", hex.EncodeToString(c.StreamID), c.Time.String())
 	if len(c.Preimage) > 0 {
 		fmt.Println("  PREIMAGE:")

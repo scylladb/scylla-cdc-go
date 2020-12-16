@@ -19,6 +19,8 @@ type streamBatchReader struct {
 	lastTimestamp gocql.UUID
 	endTimestamp  atomic.Value
 
+	consumers map[string]ChangeConsumer
+
 	perStreamProgress map[string]gocql.UUID
 
 	interruptCh chan struct{}
@@ -41,28 +43,40 @@ func newStreamBatchReader(
 
 		lastTimestamp: startFrom,
 
+		consumers: make(map[string]ChangeConsumer),
+
 		perStreamProgress: make(map[string]gocql.UUID, len(streams)),
 
 		interruptCh: make(chan struct{}, 1),
 	}
 }
 
-func (sbr *streamBatchReader) run(ctx context.Context) error {
-	if err := sbr.loadProgressForStreams(); err != nil {
+func (sbr *streamBatchReader) run(ctx context.Context) (err error) {
+	if err := sbr.loadProgressForStreams(ctx); err != nil {
 		return err
 	}
 
-	// sbr.config.Logger.Printf("running batch starting from %v", sbr.lastTimestamp.Time())
+	defer func(err *error) {
+		for s, c := range sbr.consumers {
+			err2 := c.End()
+			if *err == nil {
+				sbr.config.Logger.Printf("error while ending consumer for stream %s (will quit): %s", s, err)
+				*err = err2
+			}
+		}
+	}(&err)
 
-	input := CreateChangeConsumerInput{
-		TableName: sbr.getBaseTableName(),
-		StreamIDs: sbr.streams,
-	}
-	consumer, err := sbr.config.ChangeConsumerFactory.CreateChangeConsumer(input)
-	if err != nil {
-		sbr.config.Logger.Printf("error while creating change consumer (will quit): %s", err)
-	} else {
-		defer consumer.End()
+	for _, s := range sbr.streams {
+		input := CreateChangeConsumerInput{
+			TableName: sbr.getBaseTableName(),
+			StreamID:  s,
+		}
+		consumer, err := sbr.config.ChangeConsumerFactory.CreateChangeConsumer(ctx, input)
+		if err != nil {
+			sbr.config.Logger.Printf("error while creating change consumer (will quit): %s", err)
+		}
+
+		sbr.consumers[string(s)] = consumer
 	}
 
 	crq := newChangeRowQuerier(sbr.config.Session, sbr.streams, sbr.keyspaceName, sbr.tableName, sbr.config.Consistency)
@@ -72,8 +86,6 @@ func (sbr *streamBatchReader) run(ctx context.Context) error {
 	sbr.fastForward(crq)
 
 	wnd := sbr.getPollWindow()
-
-	// sbr.config.Logger.Printf("starting stream processor loop for %v", sbr.streams)
 
 outer:
 	for {
@@ -86,7 +98,7 @@ outer:
 			if err != nil {
 				sbr.config.Logger.Printf("error while sending a query (will retry): %s", err)
 			} else {
-				rowCount, consumerErr := sbr.processRows(iter, consumer)
+				rowCount, consumerErr := sbr.processRows(ctx, iter)
 				if err = iter.Close(); err != nil {
 					sbr.config.Logger.Printf("error while querying (will retry): %s", err)
 				}
@@ -150,7 +162,7 @@ outer:
 
 	baseTableName := sbr.getBaseTableName()
 	for _, stream := range sbr.streams {
-		if err := sbr.config.ProgressManager.SaveProgress(sbr.generationTime, baseTableName, stream, Progress{sbr.lastTimestamp}); err != nil {
+		if err := sbr.config.ProgressManager.SaveProgress(ctx, sbr.generationTime, baseTableName, stream, Progress{sbr.lastTimestamp}); err != nil {
 			// TODO: Should this be a hard error?
 			sbr.config.Logger.Printf("error while trying to save progress for table %s, stream %v: %s", baseTableName, stream, err)
 		} else {
@@ -162,9 +174,9 @@ outer:
 	return nil
 }
 
-func (sbr *streamBatchReader) loadProgressForStreams() error {
+func (sbr *streamBatchReader) loadProgressForStreams(ctx context.Context) error {
 	for _, stream := range sbr.streams {
-		progress, err := sbr.config.ProgressManager.GetProgress(sbr.generationTime, sbr.getBaseTableName(), stream)
+		progress, err := sbr.config.ProgressManager.GetProgress(ctx, sbr.generationTime, sbr.getBaseTableName(), stream)
 		if err != nil {
 			return err
 		}
@@ -256,7 +268,7 @@ func (sbr *streamBatchReader) getConfidenceLimitPoint() time.Time {
 	return time.Now().Add(-sbr.config.Advanced.ConfidenceWindowSize)
 }
 
-func (sbr *streamBatchReader) processRows(iter *changeRowIterator, consumer ChangeConsumer) (int, error) {
+func (sbr *streamBatchReader) processRows(ctx context.Context, iter *changeRowIterator) (int, error) {
 	rowCount := 0
 	var change Change
 
@@ -282,7 +294,8 @@ func (sbr *streamBatchReader) processRows(iter *changeRowIterator, consumer Chan
 			if compareTimeuuid(sbr.perStreamProgress[string(change.StreamID)], changeBatchCols.time) < 0 {
 				change.StreamID = changeBatchCols.streamID
 				change.Time = changeBatchCols.time
-				if err := consumer.Consume(change); err != nil {
+				consumer := sbr.consumers[string(change.StreamID)]
+				if err := consumer.Consume(ctx, change); err != nil {
 					sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
 					return 0, err
 				}
@@ -290,9 +303,6 @@ func (sbr *streamBatchReader) processRows(iter *changeRowIterator, consumer Chan
 				// It's important to save progress here. If fetching of a page fails,
 				// we will have to poll again, and filter out some rows.
 				sbr.perStreamProgress[string(change.StreamID)] = changeBatchCols.time
-			} else {
-				// sbr.config.Logger.Printf("skipping change due to it being too old (stream %v, %v <= %v)",
-				// 	changeBatchCols.streamID, changeBatchCols.time, sbr.perStreamProgress[string(change.StreamID)])
 			}
 
 			change.Preimage = nil

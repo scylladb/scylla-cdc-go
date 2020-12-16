@@ -1,6 +1,7 @@
 package scylla_cdc
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -361,16 +362,16 @@ func (c *ChangeRow) String() string {
 
 type CreateChangeConsumerInput struct {
 	TableName string
-	StreamIDs []StreamID
+	StreamID  StreamID
 }
 
 type ChangeConsumerFactory interface {
-	CreateChangeConsumer(input CreateChangeConsumerInput) (ChangeConsumer, error)
+	CreateChangeConsumer(ctx context.Context, input CreateChangeConsumerInput) (ChangeConsumer, error)
 }
 
 type ChangeConsumer interface {
-	End()
-	Consume(change Change) error
+	Consume(ctx context.Context, change Change) error
+	End() error
 }
 
 func MakeChangeConsumerFactoryFromFunc(f ChangeConsumerFunc) ChangeConsumerFactory {
@@ -381,7 +382,10 @@ type changeConsumerFuncInstanceFactory struct {
 	f ChangeConsumerFunc
 }
 
-func (ccfif *changeConsumerFuncInstanceFactory) CreateChangeConsumer(input CreateChangeConsumerInput) (ChangeConsumer, error) {
+func (ccfif *changeConsumerFuncInstanceFactory) CreateChangeConsumer(
+	ctx context.Context,
+	input CreateChangeConsumerInput,
+) (ChangeConsumer, error) {
 	return &changeConsumerFuncInstance{
 		tableName: input.TableName,
 		f:         ccfif.f,
@@ -393,12 +397,14 @@ type changeConsumerFuncInstance struct {
 	f         ChangeConsumerFunc
 }
 
-func (ccfi *changeConsumerFuncInstance) End() {} // TODO: Snapshot here?
-func (ccfi *changeConsumerFuncInstance) Consume(change Change) error {
-	return ccfi.f(ccfi.tableName, change)
+func (ccfi *changeConsumerFuncInstance) End() error {
+	return nil
+}
+func (ccfi *changeConsumerFuncInstance) Consume(ctx context.Context, change Change) error {
+	return ccfi.f(ctx, ccfi.tableName, change)
 }
 
-type ChangeConsumerFunc func(tableName string, change Change) error
+type ChangeConsumerFunc func(ctx context.Context, tableName string, change Change) error
 
 type changeRowQuerier struct {
 	keyspaceName string

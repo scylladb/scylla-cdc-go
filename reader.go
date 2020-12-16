@@ -101,7 +101,7 @@ type Reader struct {
 }
 
 // Creates a new CDC reader.
-func NewReader(config *ReaderConfig) (*Reader, error) {
+func NewReader(ctx context.Context, config *ReaderConfig) (*Reader, error) {
 	if config.Logger == nil {
 		config.Logger = &noLogger{}
 	}
@@ -110,7 +110,7 @@ func NewReader(config *ReaderConfig) (*Reader, error) {
 		return nil, errors.New("no progress manager was specified")
 	}
 
-	readFrom, err := config.ProgressManager.GetCurrentGeneration()
+	readFrom, err := config.ProgressManager.GetCurrentGeneration(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func (r *Reader) Run(ctx context.Context) error {
 		for {
 			l.Printf("starting reading generation %v from timestamp %v", gen.startTime, r.readFrom)
 
-			if err := r.config.ProgressManager.StartGeneration(gen.startTime); err != nil {
+			if err := r.config.ProgressManager.StartGeneration(ctx, gen.startTime); err != nil {
 				return err
 			}
 

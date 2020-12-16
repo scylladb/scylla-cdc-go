@@ -217,7 +217,7 @@ func TestTypes(t *testing.T) {
 	var rowsMu sync.Mutex
 	changeRows := make(map[string][]*ChangeRow)
 
-	factory := MakeChangeConsumerFactoryFromFunc(func(tableName string, c Change) error {
+	factory := MakeChangeConsumerFactoryFromFunc(func(ctx context.Context, tableName string, c Change) error {
 		rowsMu.Lock()
 		defer rowsMu.Unlock()
 		changeRows[tableName] = append(changeRows[tableName], c.Delta...)
@@ -271,7 +271,7 @@ func TestTypes(t *testing.T) {
 	cfg.Advanced = adv
 	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
-	reader, err := NewReader(cfg)
+	reader, err := NewReader(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

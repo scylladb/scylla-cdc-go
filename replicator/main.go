@@ -79,6 +79,7 @@ func main() {
 
 	logger := log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 	repl, err := newReplicator(
+		context.Background(),
 		source, destination,
 		fullyQualifiedTables,
 		&adv,
@@ -150,6 +151,7 @@ type replicator struct {
 }
 
 func newReplicator(
+	ctx context.Context,
 	source, destination string,
 	tableNames []string,
 	advancedParams *scylla_cdc.AdvancedReaderConfig,
@@ -195,7 +197,7 @@ func newReplicator(
 	cfg.Consistency = readConsistency
 	cfg.Logger = logger
 
-	reader, err := scylla_cdc.NewReader(cfg)
+	reader, err := scylla_cdc.NewReader(ctx, cfg)
 	if err != nil {
 		sourceSession.Close()
 		destinationSession.Close()
@@ -239,7 +241,10 @@ type replicatorFactory struct {
 	rowsRead *int64
 }
 
-func (rf *replicatorFactory) CreateChangeConsumer(input scylla_cdc.CreateChangeConsumerInput) (scylla_cdc.ChangeConsumer, error) {
+func (rf *replicatorFactory) CreateChangeConsumer(
+	ctx context.Context,
+	input scylla_cdc.CreateChangeConsumerInput,
+) (scylla_cdc.ChangeConsumer, error) {
 	splitTableName := strings.SplitN(input.TableName, ".", 2)
 	if len(splitTableName) < 2 {
 		return nil, fmt.Errorf("table name is not fully qualified: %s", input.TableName)
@@ -256,7 +261,7 @@ func (rf *replicatorFactory) CreateChangeConsumer(input scylla_cdc.CreateChangeC
 		return nil, fmt.Errorf("table %s does not exist", input.TableName)
 	}
 
-	return NewDeltaReplicator(rf.destinationSession, kmeta, tmeta, rf.consistency, rf.rowsRead, input.StreamIDs)
+	return NewDeltaReplicator(rf.destinationSession, kmeta, tmeta, rf.consistency, rf.rowsRead, input.StreamID)
 }
 
 type DeltaReplicator struct {
@@ -277,7 +282,7 @@ type DeltaReplicator struct {
 	localCount int64
 	totalCount *int64
 
-	streamIDs []scylla_cdc.StreamID
+	streamID scylla_cdc.StreamID
 }
 
 type updateQuerySet struct {
@@ -290,7 +295,14 @@ type udtInfo struct {
 	fields      []string
 }
 
-func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, meta *gocql.TableMetadata, consistency gocql.Consistency, count *int64, streamIDs []scylla_cdc.StreamID) (*DeltaReplicator, error) {
+func NewDeltaReplicator(
+	session *gocql.Session,
+	kmeta *gocql.KeyspaceMetadata,
+	meta *gocql.TableMetadata,
+	consistency gocql.Consistency,
+	count *int64,
+	streamID scylla_cdc.StreamID,
+) (*DeltaReplicator, error) {
 	var (
 		pkColumns    []string
 		ckColumns    []string
@@ -328,7 +340,7 @@ func NewDeltaReplicator(session *gocql.Session, kmeta *gocql.KeyspaceMetadata, m
 
 		totalCount: count,
 
-		streamIDs: streamIDs,
+		streamID: streamID,
 	}
 
 	dr.precomputeQueries()
@@ -362,7 +374,7 @@ func (r *DeltaReplicator) precomputeQueries() {
 	)
 }
 
-func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
+func (r *DeltaReplicator) Consume(ctx context.Context, c scylla_cdc.Change) error {
 	timestamp := c.GetCassandraTimestamp()
 	pos := 0
 
@@ -375,19 +387,19 @@ func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
 		var err error
 		switch change.GetOperation() {
 		case scylla_cdc.Update:
-			err = r.processUpdate(timestamp, change)
+			err = r.processUpdate(ctx, timestamp, change)
 			pos++
 
 		case scylla_cdc.Insert:
-			err = r.processInsert(timestamp, change)
+			err = r.processInsert(ctx, timestamp, change)
 			pos++
 
 		case scylla_cdc.RowDelete:
-			err = r.processRowDelete(timestamp, change)
+			err = r.processRowDelete(ctx, timestamp, change)
 			pos++
 
 		case scylla_cdc.PartitionDelete:
-			err = r.processPartitionDelete(timestamp, change)
+			err = r.processPartitionDelete(ctx, timestamp, change)
 			pos++
 
 		case scylla_cdc.RangeDeleteStartInclusive, scylla_cdc.RangeDeleteStartExclusive:
@@ -401,7 +413,7 @@ func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
 			if end.GetOperation() != scylla_cdc.RangeDeleteEndInclusive && end.GetOperation() != scylla_cdc.RangeDeleteEndExclusive {
 				return errors.New("invalid change: range delete start row without corresponding end row")
 			}
-			err = r.processRangeDelete(timestamp, start, end)
+			err = r.processRangeDelete(ctx, timestamp, start, end)
 			pos += 2
 
 		case scylla_cdc.RangeDeleteEndInclusive, scylla_cdc.RangeDeleteEndExclusive:
@@ -423,31 +435,28 @@ func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
 	return nil
 }
 
-func (r *DeltaReplicator) End() {
-	var hexStreams []string
-	for _, id := range r.streamIDs {
-		hexStreams = append(hexStreams, hex.EncodeToString(id))
-	}
-	log.Printf("Streams [%s]: processed %d changes in total", strings.Join(hexStreams, ", "), r.localCount)
+func (r *DeltaReplicator) End() error {
+	log.Printf("Streams [%s]: processed %d changes in total", hex.EncodeToString(r.streamID), r.localCount)
 	atomic.AddInt64(r.totalCount, r.localCount)
+	return nil
 }
 
-func (r *DeltaReplicator) processUpdate(timestamp int64, c *scylla_cdc.ChangeRow) error {
-	return r.processInsertOrUpdate(timestamp, false, c)
+func (r *DeltaReplicator) processUpdate(ctx context.Context, timestamp int64, c *scylla_cdc.ChangeRow) error {
+	return r.processInsertOrUpdate(ctx, timestamp, false, c)
 }
 
-func (r *DeltaReplicator) processInsert(timestamp int64, c *scylla_cdc.ChangeRow) error {
-	return r.processInsertOrUpdate(timestamp, true, c)
+func (r *DeltaReplicator) processInsert(ctx context.Context, timestamp int64, c *scylla_cdc.ChangeRow) error {
+	return r.processInsertOrUpdate(ctx, timestamp, true, c)
 }
 
-func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, c *scylla_cdc.ChangeRow) error {
+func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp int64, isInsert bool, c *scylla_cdc.ChangeRow) error {
 	runQuery := func(q string, vals []interface{}) error {
 		if debugQueries {
 			fmt.Println(q)
 			fmt.Println(vals...)
 		}
 
-		return tryWithExponentialBackoff(func() error {
+		return tryWithExponentialBackoff(ctx, func() error {
 			return r.session.
 				Query(q, vals...).
 				Consistency(r.consistency).
@@ -700,7 +709,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 	return nil
 }
 
-func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.ChangeRow) error {
+func (r *DeltaReplicator) processRowDelete(ctx context.Context, timestamp int64, c *scylla_cdc.ChangeRow) error {
 	vals := make([]interface{}, 0, len(r.pkColumns)+len(r.ckColumns))
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
 	vals = appendKeyValuesToBind(vals, r.ckColumns, c)
@@ -710,7 +719,7 @@ func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.Change
 		fmt.Println(vals...)
 	}
 
-	return tryWithExponentialBackoff(func() error {
+	return tryWithExponentialBackoff(ctx, func() error {
 		return r.session.
 			Query(r.rowDeleteQueryStr, vals...).
 			Consistency(r.consistency).
@@ -720,7 +729,7 @@ func (r *DeltaReplicator) processRowDelete(timestamp int64, c *scylla_cdc.Change
 	})
 }
 
-func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.ChangeRow) error {
+func (r *DeltaReplicator) processPartitionDelete(ctx context.Context, timestamp int64, c *scylla_cdc.ChangeRow) error {
 	vals := make([]interface{}, 0, len(r.pkColumns))
 	vals = appendKeyValuesToBind(vals, r.pkColumns, c)
 
@@ -729,7 +738,7 @@ func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.
 		fmt.Println(vals...)
 	}
 
-	return tryWithExponentialBackoff(func() error {
+	return tryWithExponentialBackoff(ctx, func() error {
 		return r.session.
 			Query(r.partitionDeleteQueryStr, vals...).
 			Consistency(r.consistency).
@@ -739,7 +748,7 @@ func (r *DeltaReplicator) processPartitionDelete(timestamp int64, c *scylla_cdc.
 	})
 }
 
-func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla_cdc.ChangeRow) error {
+func (r *DeltaReplicator) processRangeDelete(ctx context.Context, timestamp int64, start, end *scylla_cdc.ChangeRow) error {
 	vals := make([]interface{}, 0)
 	vals = appendKeyValuesToBind(vals, r.pkColumns, start)
 
@@ -793,7 +802,7 @@ func (r *DeltaReplicator) processRangeDelete(timestamp int64, start, end *scylla
 		fmt.Println(vals...)
 	}
 
-	return tryWithExponentialBackoff(func() error {
+	return tryWithExponentialBackoff(ctx, func() error {
 		return r.session.
 			Query(deleteStr, vals...).
 			Consistency(r.consistency).
@@ -876,12 +885,18 @@ func appendKeyValuesToBind(
 	return vals
 }
 
-func tryWithExponentialBackoff(f func() error) error {
+func tryWithExponentialBackoff(ctx context.Context, f func() error) error {
 	dur := 50 * time.Millisecond
 	var err error
 	// TODO: Make it stop when the replicator is shut down
 	i := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		err = f()
 		if err == nil {
 			return nil

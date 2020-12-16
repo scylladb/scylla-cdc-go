@@ -13,28 +13,28 @@ type ProgressReporter interface {
 	// MarkProgress saves information about the last successfully processed
 	// cdc log record. If the reader is restarted, it should resume reading
 	// from this stream starting after the last marked position.
-	MarkProgress(progress Progress) error
+	MarkProgress(ctx context.Context, progress Progress) error
 }
 
 type ProgressManager interface {
 	// GetCurrentGenerationTime returns the time of the generation that was
 	// saved as being currently processed. If there was no such information
 	// saved, it returns a zero value for Time.
-	GetCurrentGeneration() (time.Time, error)
+	GetCurrentGeneration(ctx context.Context) (time.Time, error)
 
 	// StartGeneration is called when a generation is discovered and the reader
 	// should start processing the next generation.
-	StartGeneration(gen time.Time) error
+	StartGeneration(ctx context.Context, gen time.Time) error
 
 	// GetProgress retrieves information about the progress of given stream,
 	// in a given table. It can return zero value for Progress if there was
 	// no information about the stream
-	GetProgress(gen time.Time, table string, streamID StreamID) (Progress, error)
+	GetProgress(ctx context.Context, gen time.Time, table string, streamID StreamID) (Progress, error)
 
 	// SaveProgress stores information about the last cdc log record which was
 	// processed successfully. If the reader is restarted, it should resume
 	// work for this stream from the last saved
-	SaveProgress(gen time.Time, table string, streamID StreamID, progress Progress) error
+	SaveProgress(ctx context.Context, gen time.Time, table string, streamID StreamID, progress Progress) error
 }
 
 type Progress struct {
@@ -45,19 +45,19 @@ type Progress struct {
 // when saving progress is not necessary.
 type NoProgressManager struct{}
 
-func (*NoProgressManager) GetCurrentGeneration() (time.Time, error) {
+func (*NoProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
 	return time.Time{}, nil
 }
 
-func (*NoProgressManager) StartGeneration(gen time.Time) error {
+func (*NoProgressManager) StartGeneration(ctx context.Context, gen time.Time) error {
 	return nil
 }
 
-func (*NoProgressManager) GetProgress(gen time.Time, table string, streamID StreamID) (Progress, error) {
+func (*NoProgressManager) GetProgress(ctx context.Context, gen time.Time, table string, streamID StreamID) (Progress, error) {
 	return Progress{}, nil
 }
 
-func (*NoProgressManager) SaveProgress(gen time.Time, table string, streamID StreamID, progress Progress) error {
+func (*NoProgressManager) SaveProgress(ctx context.Context, gen time.Time, table string, streamID StreamID, progress Progress) error {
 	return nil
 }
 
@@ -100,7 +100,7 @@ func (tbpm *TableBackedProgressManager) ensureTableExists() error {
 	).Exec()
 }
 
-func (tbpm *TableBackedProgressManager) GetCurrentGeneration() (time.Time, error) {
+func (tbpm *TableBackedProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
 	var gen time.Time
 	err := tbpm.session.Query(
 		fmt.Sprintf("SELECT current_generation FROM %s WHERE generation = ? AND table_name = ? AND stream_id = ?", tbpm.progressTableName),
@@ -113,7 +113,7 @@ func (tbpm *TableBackedProgressManager) GetCurrentGeneration() (time.Time, error
 	return gen, nil
 }
 
-func (tbpm *TableBackedProgressManager) StartGeneration(gen time.Time) error {
+func (tbpm *TableBackedProgressManager) StartGeneration(ctx context.Context, gen time.Time) error {
 	// Update the progress in the special partition
 	return tbpm.session.Query(
 		fmt.Sprintf(
@@ -125,8 +125,8 @@ func (tbpm *TableBackedProgressManager) StartGeneration(gen time.Time) error {
 	).Exec()
 }
 
-func (tbpm *TableBackedProgressManager) GetProgress(gen time.Time, tableName string, streamID StreamID) (Progress, error) {
-	tbpm.concurrentQueryLimiter.Acquire(context.TODO(), 1)
+func (tbpm *TableBackedProgressManager) GetProgress(ctx context.Context, gen time.Time, tableName string, streamID StreamID) (Progress, error) {
+	tbpm.concurrentQueryLimiter.Acquire(ctx, 1)
 	defer tbpm.concurrentQueryLimiter.Release(1)
 
 	var timestamp gocql.UUID
@@ -141,8 +141,8 @@ func (tbpm *TableBackedProgressManager) GetProgress(gen time.Time, tableName str
 	return Progress{timestamp}, nil
 }
 
-func (tbpm *TableBackedProgressManager) SaveProgress(gen time.Time, tableName string, streamID StreamID, progress Progress) error {
-	tbpm.concurrentQueryLimiter.Acquire(context.TODO(), 1)
+func (tbpm *TableBackedProgressManager) SaveProgress(ctx context.Context, gen time.Time, tableName string, streamID StreamID, progress Progress) error {
+	tbpm.concurrentQueryLimiter.Acquire(ctx, 1)
 	defer tbpm.concurrentQueryLimiter.Release(1)
 
 	return tbpm.session.Query(
@@ -160,6 +160,6 @@ type tableAndStreamProgressReporter struct {
 	streamID        StreamID
 }
 
-func (taspr *tableAndStreamProgressReporter) MarkProgress(progress Progress) error {
-	return taspr.progressManager.SaveProgress(taspr.gen, taspr.tableName, taspr.streamID, progress)
+func (taspr *tableAndStreamProgressReporter) MarkProgress(ctx context.Context, progress Progress) error {
+	return taspr.progressManager.SaveProgress(ctx, taspr.gen, taspr.tableName, taspr.streamID, progress)
 }
