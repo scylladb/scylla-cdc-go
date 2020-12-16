@@ -652,65 +652,38 @@ func (r *DeltaReplicator) processInsertOrUpdate(timestamp int64, isInsert bool, 
 			} else {
 				// Overwrite those columns which are non-null in AddedFields,
 				// and remove those which are listed in RemovedFields.
-				// In order to do this, we need to know the schema
-				// of the UDT.
+				var vals []interface{}
+				vals = append(vals, c.GetTTL())
+				fieldAssignments := make([]string, 0, len(udtChange.AddedFields)+len(udtChange.RemovedFields))
 
-				// TODO: Optimize, this makes processing of the row quadratic
-				colInfos := c.Columns()
-				var udtInfo gocql.UDTTypeInfo
-				for _, colInfo := range colInfos {
-					if colInfo.Name == colName {
-						udtInfo = colInfo.TypeInfo.(gocql.UDTTypeInfo)
-						break
-					}
-				}
-
-				elementValues := make([]interface{}, len(udtInfo.Elements))
-
-				// Determine which elements to set, which to remove and which to ignore
-				for i := range elementValues {
-					elementValues[i] = gocql.UnsetValue
-				}
-				for i, el := range udtInfo.Elements {
-					v := udtChange.AddedFields[el.Name]
-					// TODO: Do we want to use pointers in maps?
-					if v != nil && !reflect.ValueOf(v).IsNil() {
-						elementValues[i] = v
-					}
-				}
-				for _, idx := range udtChange.RemovedFields {
-					elementValues[idx] = nil
-				}
-
-				// Send an individual query for each field that is being updated
-				for i, el := range udtInfo.Elements {
-					v := elementValues[i]
-					if v == gocql.UnsetValue {
+				// Overwrites
+				for fieldName, fieldValue := range udtChange.AddedFields {
+					if reflect.ValueOf(fieldValue).IsNil() {
 						continue
 					}
 
-					// fmt.Printf("    %#v\n", v)
+					// TODO: Properly create a bind marker, tuples nested in udts may cause problems
+					fieldAssignments = append(fieldAssignments, fmt.Sprintf("%s.%s = ?", colName, fieldName))
+					vals = append(vals, fieldValue)
+				}
 
-					bindValue := "null"
-					if v != nil {
-						// TODO: This should be "typ" for the UDT element
-						bindValue = makeBindMarkerForType(typ)
-					}
+				// Clears
+				for _, fieldName := range udtChange.RemovedFields {
+					fieldAssignments = append(fieldAssignments, fmt.Sprintf("%s.%s = ?", colName, fieldName))
+					vals = append(vals, nil)
+				}
 
-					updateFieldStr := fmt.Sprintf(
-						"UPDATE %s USING TTL ? SET %s.%s = %s WHERE %s",
-						r.tableName, colName, el.Name, bindValue, pkConditions,
-					)
+				vals = appendKeyValuesToBind(vals, keyColumns, c)
 
-					var vals []interface{}
-					vals = append(vals, c.GetTTL())
-					if v != nil {
-						vals = appendValueByType(vals, v, typ)
-					}
-					vals = appendKeyValuesToBind(vals, keyColumns, c)
-					if err := runQuery(updateFieldStr, vals); err != nil {
-						return err
-					}
+				updateUDTStr := fmt.Sprintf(
+					"UPDATE %s USING TTL ? SET %s WHERE %s",
+					r.tableName,
+					strings.Join(fieldAssignments, ", "),
+					pkConditions,
+				)
+
+				if err := runQuery(updateUDTStr, vals); err != nil {
+					return err
 				}
 			}
 		}

@@ -185,7 +185,8 @@ type MapChange struct {
 type UDTChange struct {
 	AddedFields map[string]interface{}
 
-	RemovedFields []int16
+	RemovedFieldsIndices    []int16
+	RemovedFields []string
 
 	IsReset bool
 }
@@ -236,16 +237,28 @@ func (c *ChangeRow) GetMapChange(column string) MapChange {
 	}
 }
 
+// TODO: Error checking, e.g. check if given column is a UDT
 func (c *ChangeRow) GetUDTChange(column string) UDTChange {
 	v, _ := c.GetValue(column)
 	typedV, _ := v.(map[string]interface{})
+	colType, _ := c.GetType(column)
+	udtType := colType.(gocql.UDTTypeInfo)
 	isDeleted, _ := c.IsDeleted(column)
 	deletedElements, _ := c.GetDeletedElements(column)
+
 	typedDeletedElements, _ := deletedElements.([]int16)
+	deletedNames := make([]string, len(typedDeletedElements))
+
+	// TODO: Protect from indices being outside range
+	for i, el := range typedDeletedElements {
+		deletedNames[i] = udtType.Elements[el].Name
+	}
+
 	udtC := UDTChange{
-		AddedFields:   typedV,
-		RemovedFields: typedDeletedElements,
-		IsReset:       isDeleted,
+		AddedFields:      typedV,
+		RemovedFieldsIndices:    typedDeletedElements,
+		RemovedFields: deletedNames,
+		IsReset:          isDeleted,
 	}
 
 	return udtC
