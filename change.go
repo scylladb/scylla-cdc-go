@@ -68,10 +68,12 @@ func (c *Change) GetCassandraTimestamp() int64 {
 
 // ChangeRow corresponds to a single row from the cdc log
 type ChangeRow struct {
-	data    map[string]interface{}
-	cdcCols cdcChangeRowCols
+	fieldNameToIdx map[string]int
 
+	data     []interface{}
 	colInfos []gocql.ColumnInfo
+
+	cdcCols cdcChangeRowCols
 }
 
 // Contains columns specific to a change row batch (rows which have
@@ -261,14 +263,17 @@ func (c *ChangeRow) GetTTL() int64 {
 
 // GetValue returns value that was assigned to this specific column
 func (c *ChangeRow) GetValue(columnName string) (interface{}, bool) {
-	v, ok := c.data[columnName]
-	return v, ok
+	idx, ok := c.fieldNameToIdx[columnName]
+	if !ok {
+		return nil, false
+	}
+	return c.data[idx], c.data[idx] != nil
 }
 
 // IsDeleted returns a boolean indicating if given column was set to null.
 // This only works for clustering columns.
 func (c *ChangeRow) IsDeleted(columnName string) (bool, bool) {
-	v, ok := c.data["cdc$deleted_"+columnName]
+	v, ok := c.GetValue("cdc$deleted_" + columnName)
 	if !ok {
 		return false, false
 	}
@@ -278,13 +283,23 @@ func (c *ChangeRow) IsDeleted(columnName string) (bool, bool) {
 // GetDeletedElements returns which elements were deleted from the non-atomic column.
 // This function works only for non-atomic columns
 func (c *ChangeRow) GetDeletedElements(columnName string) (interface{}, bool) {
-	v, ok := c.data["cdc$deleted_elements_"+columnName]
+	v, ok := c.GetValue("cdc$deleted_elements_" + columnName)
 	return v, ok
 }
 
-// Columns returns information about data columns in the cdc log table (without those with "cdc$" prefix)
+// Columns returns information about data columns in the cdc log table. It contains
+// information about all columns - both with and without cdc$ prefix.
 func (c *ChangeRow) Columns() []gocql.ColumnInfo {
 	return c.colInfos
+}
+
+// GetType returns gocql's representation of given column type.
+func (c *ChangeRow) GetType(columnName string) (gocql.TypeInfo, bool) {
+	idx, ok := c.fieldNameToIdx[columnName]
+	if !ok {
+		return nil, false
+	}
+	return c.colInfos[idx].TypeInfo, true
 }
 
 func (c *ChangeRow) String() string {
@@ -534,10 +549,14 @@ type changeRowIterator struct {
 	cdcChangeBatchCols cdcChangeBatchCols
 	cdcChangeRowCols   cdcChangeRowCols
 
+	// Contains information on all columns apart from the writetime() ones
 	colInfos []gocql.ColumnInfo
 
 	// Maps from tuple column names to the index they occupy in columnValues
-	tupleNameToIdx  map[string]int
+	tupleNameToWritetimeIdx map[string]int
+	// Maps from column name to index in change slice
+	fieldNameToIdx map[string]int
+
 	tupleWriteTimes []int64
 }
 
@@ -563,9 +582,9 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 	// a tuple with all columns null, and a tuple which is null itself.
 
 	// Assign slots in the beginning for tuples' writetime
-	tupleNameToIdx := make(map[string]int, len(tupleNames))
+	tupleNameToWritetimeIdx := make(map[string]int, len(tupleNames))
 	for i, name := range tupleNames {
-		tupleNameToIdx[name] = i
+		tupleNameToWritetimeIdx[name] = i
 	}
 
 	ci := &changeRowIterator{
@@ -573,8 +592,9 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 		columnValues: make([]interface{}, 0, len(allCols)),
 		colInfos:     make([]gocql.ColumnInfo, 0, len(allCols)),
 
-		tupleNameToIdx:  tupleNameToIdx,
-		tupleWriteTimes: make([]int64, len(tupleNames)),
+		tupleNameToWritetimeIdx: tupleNameToWritetimeIdx,
+		fieldNameToIdx:          make(map[string]int),
+		tupleWriteTimes:         make([]int64, len(tupleNames)),
 	}
 
 	// tupleWriteTimes will receive results of the writetime function
@@ -583,17 +603,15 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 		ci.columnValues = append(ci.columnValues, &ci.tupleWriteTimes[i])
 	}
 
-	for _, col := range allCols[len(tupleNames):] {
-		if !strings.HasPrefix(col.Name, "cdc$") {
-			// colInfos will only have information about non-cdc-specific columns
-			ci.colInfos = append(ci.colInfos, col)
-		}
+	ci.colInfos = allCols[len(tupleNames):]
 
+	for colIdx, col := range ci.colInfos {
 		if tupTyp, ok := col.TypeInfo.(gocql.TupleTypeInfo); ok {
 			// Gocql operates on "flattened" tuples, therefore we need to put
 			// a separate value for each tuple element.
 			// To represent a field, use value returned by gocql's TypeInfo.New(),
 			// but convert it into a pointer
+			ci.fieldNameToIdx[col.Name] = colIdx
 			for _, el := range tupTyp.Elems {
 				ci.columnValues = append(ci.columnValues, reflect.New(reflect.TypeOf(el.New())).Interface())
 			}
@@ -634,6 +652,7 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 					cval = col.TypeInfo.New()
 				}
 			}
+			ci.fieldNameToIdx[col.Name] = colIdx
 			ci.columnValues = append(ci.columnValues, cval)
 		}
 	}
@@ -647,15 +666,18 @@ func (ci *changeRowIterator) Next() (cdcChangeBatchCols, *ChangeRow) {
 	}
 
 	change := &ChangeRow{
-		data:     make(map[string]interface{}, len(ci.columnValues)-6),
-		cdcCols:  ci.cdcChangeRowCols,
+		fieldNameToIdx: ci.fieldNameToIdx,
+
+		data:     make([]interface{}, len(ci.colInfos)),
 		colInfos: ci.colInfos,
+
+		cdcCols: ci.cdcChangeRowCols,
 	}
 
 	// Beginning of tupleWriteTimes contains
 	// At the beginning, there are writetime() for tuples. Skip them
 	pos := len(ci.tupleWriteTimes)
-	for _, col := range ci.iter.Columns()[len(ci.tupleWriteTimes):] {
+	for idxInSlice, col := range ci.colInfos {
 		// TODO: Optimize
 		if strings.HasPrefix(col.Name, "cdc$") && !strings.HasPrefix(col.Name, "cdc$deleted_") {
 			pos++
@@ -676,27 +698,27 @@ func (ci *changeRowIterator) Next() (cdcChangeBatchCols, *ChangeRow) {
 			// This is a workaround needed because gocql does not differentiate
 			// null tuples from tuples which have all their elements as null
 			tupLen := len(tupTyp.Elems)
-			tupIdx := ci.tupleNameToIdx[col.Name]
+			tupIdx := ci.tupleNameToWritetimeIdx[col.Name]
 			if ci.tupleWriteTimes[tupIdx] != 0 {
 				v := make([]interface{}, tupLen)
 				for i := 0; i < tupLen; i++ {
 					vv := reflect.Indirect(reflect.ValueOf(ci.columnValues[pos+i])).Interface()
 					v[i] = adjustBytes(vv)
 				}
-				change.data[col.Name] = v
+				change.data[idxInSlice] = v
 			}
 			pos += tupLen
 		} else if col.TypeInfo.Type() == gocql.TypeUDT {
 			v := ci.columnValues[pos].(*udtWithNulls)
 			if v != nil {
-				change.data[col.Name] = v.fields
+				change.data[idxInSlice] = v.fields
 				v.fields = nil
 			}
 			pos++
 		} else {
 			v, notNull := maybeDereferenceTwice(ci.columnValues[pos])
 			if notNull {
-				change.data[col.Name] = adjustBytes(v)
+				change.data[idxInSlice] = adjustBytes(v)
 			}
 			pos++
 		}
