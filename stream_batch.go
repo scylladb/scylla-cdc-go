@@ -281,6 +281,8 @@ func (sbr *streamBatchReader) processRows(iter *changeRowIterator, consumer Chan
 			change.Delta = append(change.Delta, c)
 		}
 
+		rowCount++
+
 		if c.cdcCols.endOfBatch {
 			// Since we are reading in batches and we started from the lowest progress mark
 			// of all streams in the batch, we might have to manually filter out changes
@@ -297,8 +299,8 @@ func (sbr *streamBatchReader) processRows(iter *changeRowIterator, consumer Chan
 				// we will have to poll again, and filter out some rows.
 				sbr.perStreamProgress[string(change.StreamID)] = changeBatchCols.time
 			} else {
-				sbr.config.Logger.Printf("skipping change due to it being too old (%v <= %v)",
-					changeBatchCols.streamID, sbr.perStreamProgress[string(change.StreamID)].Time())
+				// sbr.config.Logger.Printf("skipping change due to it being too old (stream %v, %v <= %v)",
+				// 	changeBatchCols.streamID, changeBatchCols.time, sbr.perStreamProgress[string(change.StreamID)])
 			}
 
 			change.Preimage = nil

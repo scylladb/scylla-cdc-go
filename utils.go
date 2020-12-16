@@ -20,7 +20,7 @@ func compareTimeuuid(u1 gocql.UUID, u2 gocql.UUID) int {
 
 	// Lexicographically compare the second half as signed bytes
 	for i := 8; i < 16; i++ {
-		d := int8(u1[i]) - int8(u2[i])
+		d := int(int8(u1[i])) - int(int8(u2[i]))
 		if d != 0 {
 			return int(d)
 		}
