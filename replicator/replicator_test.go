@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"reflect"
 	"regexp"
@@ -387,7 +388,8 @@ func TestReplicator(t *testing.T) {
 		schemaNames = append(schemaNames, tbl)
 	}
 
-	replicator, _, err := MakeReplicator(sourceAddress, destinationAddress, schemaNames, &adv, gocql.Quorum, gocql.Quorum)
+	logger := log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
+	replicator, err := newReplicator(sourceAddress, destinationAddress, schemaNames, &adv, gocql.Quorum, gocql.Quorum, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

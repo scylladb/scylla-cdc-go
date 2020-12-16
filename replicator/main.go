@@ -77,12 +77,14 @@ func main() {
 		fullyQualifiedTables = append(fullyQualifiedTables, keyspace+"."+t)
 	}
 
-	reader, rowsRead, err := MakeReplicator(
+	logger := log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
+	repl, err := newReplicator(
 		source, destination,
 		fullyQualifiedTables,
 		&adv,
 		clRead,
 		clWrite,
+		logger,
 	)
 	if err != nil {
 		log.Fatalln(err)
@@ -105,7 +107,7 @@ func main() {
 		<-signalC
 		now := time.Now()
 		log.Printf("stopping at %v", now)
-		reader.StopAt(now)
+		repl.StopAt(now)
 
 		<-signalC
 		log.Printf("stopping now")
@@ -117,11 +119,11 @@ func main() {
 	}()
 	signal.Notify(signalC, os.Interrupt)
 
-	if err := reader.Run(ctx); err != nil {
+	if err := repl.Run(ctx); err != nil {
 		log.Fatalln(err)
 	}
 
-	log.Printf("quitting, rows read: %d", *rowsRead)
+	log.Printf("quitting, rows read: %d", repl.GetReadRowsCount())
 }
 
 func parseConsistency(s string) gocql.Consistency {
@@ -138,27 +140,36 @@ func parseConsistency(s string) gocql.Consistency {
 	}
 }
 
-func MakeReplicator(
+type replicator struct {
+	reader *scylla_cdc.Reader
+
+	sourceSession      *gocql.Session
+	destinationSession *gocql.Session
+
+	rowsRead *int64
+}
+
+func newReplicator(
 	source, destination string,
 	tableNames []string,
 	advancedParams *scylla_cdc.AdvancedReaderConfig,
 	readConsistency gocql.Consistency,
 	writeConsistency gocql.Consistency,
-) (*scylla_cdc.Reader, *int64, error) {
-	// Configure a session for the destination cluster
+	logger scylla_cdc.Logger,
+) (*replicator, error) {
 	destinationCluster := gocql.NewCluster(destination)
 	destinationSession, err := destinationCluster.CreateSession()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Configure a session
 	cluster := gocql.NewCluster(source)
 	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
-	session, err := cluster.CreateSession()
+	sourceSession, err := cluster.CreateSession()
 	if err != nil {
 		destinationSession.Close()
-		return nil, nil, err
+		return nil, err
 	}
 
 	rowsRead := new(int64)
@@ -173,7 +184,7 @@ func MakeReplicator(
 	// Configuration for the CDC reader
 	// TODO: Allow specifying a progress manager
 	cfg := scylla_cdc.NewReaderConfig(
-		session,
+		sourceSession,
 		factory,
 		&scylla_cdc.NoProgressManager{},
 		tableNames...,
@@ -182,17 +193,43 @@ func MakeReplicator(
 		cfg.Advanced = *advancedParams
 	}
 	cfg.Consistency = readConsistency
-	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
+	cfg.Logger = logger
 
 	reader, err := scylla_cdc.NewReader(cfg)
 	if err != nil {
-		session.Close()
+		sourceSession.Close()
 		destinationSession.Close()
-		return nil, nil, err
+		return nil, err
 	}
 
-	// TODO: source and destination sessions are leaking
-	return reader, rowsRead, nil
+	repl := &replicator{
+		reader: reader,
+
+		sourceSession:      sourceSession,
+		destinationSession: destinationSession,
+
+		rowsRead: rowsRead,
+	}
+
+	return repl, nil
+}
+
+func (repl *replicator) Run(ctx context.Context) error {
+	defer repl.destinationSession.Close()
+	defer repl.sourceSession.Close()
+	return repl.reader.Run(ctx)
+}
+
+func (repl *replicator) StopAt(at time.Time) {
+	repl.reader.StopAt(at)
+}
+
+func (repl *replicator) Stop() {
+	repl.reader.Stop()
+}
+
+func (repl *replicator) GetReadRowsCount() int64 {
+	return atomic.LoadInt64(repl.rowsRead)
 }
 
 type replicatorFactory struct {
