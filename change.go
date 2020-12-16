@@ -185,8 +185,8 @@ type MapChange struct {
 type UDTChange struct {
 	AddedFields map[string]interface{}
 
-	RemovedFieldsIndices    []int16
-	RemovedFields []string
+	RemovedFieldsIndices []int16
+	RemovedFields        []string
 
 	IsReset bool
 }
@@ -255,10 +255,10 @@ func (c *ChangeRow) GetUDTChange(column string) UDTChange {
 	}
 
 	udtC := UDTChange{
-		AddedFields:      typedV,
-		RemovedFieldsIndices:    typedDeletedElements,
-		RemovedFields: deletedNames,
-		IsReset:          isDeleted,
+		AddedFields:          typedV,
+		RemovedFieldsIndices: typedDeletedElements,
+		RemovedFields:        deletedNames,
+		IsReset:              isDeleted,
 	}
 
 	return udtC
@@ -770,6 +770,7 @@ type udtWithNulls struct {
 }
 
 func (uwn *udtWithNulls) UnmarshalUDT(name string, info gocql.TypeInfo, data []byte) error {
+	// info.New() returns a pointer to a value, therefore ptr is a double pointer (**T)
 	ptr := reflect.New(reflect.TypeOf(info.New())).Interface()
 	if err := gocql.Unmarshal(info, data, ptr); err != nil {
 		return err
@@ -777,6 +778,7 @@ func (uwn *udtWithNulls) UnmarshalUDT(name string, info gocql.TypeInfo, data []b
 	if uwn.fields == nil {
 		uwn.fields = make(map[string]interface{})
 	}
+	// vv is *T
 	vv := reflect.Indirect(reflect.ValueOf(ptr)).Interface()
 	uwn.fields[name] = adjustBytes(vv)
 	return nil

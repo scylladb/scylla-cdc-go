@@ -398,11 +398,19 @@ func (r *DeltaReplicator) Consume(c scylla_cdc.Change) error {
 			}
 			start := change
 			end := c.Delta[pos+1]
+			if end.GetOperation() != scylla_cdc.RangeDeleteEndInclusive && end.GetOperation() != scylla_cdc.RangeDeleteEndExclusive {
+				return errors.New("invalid change: range delete start row without corresponding end row")
+			}
 			err = r.processRangeDelete(timestamp, start, end)
 			pos += 2
 
+		case scylla_cdc.RangeDeleteEndInclusive, scylla_cdc.RangeDeleteEndExclusive:
+			// This should not happen and indicates some kind of inconsistency.
+			// Every RangeDeleteEnd... row should be preceded by a RangeDeleteStart... row.
+			return errors.New("invalid change: range delete end row does not have a corresponding start row")
+
 		default:
-			panic("unsupported operation: " + change.GetOperation().String())
+			return errors.New("unsupported operation: " + change.GetOperation().String())
 		}
 
 		if err != nil {
