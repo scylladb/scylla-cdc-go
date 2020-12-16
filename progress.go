@@ -77,7 +77,7 @@ type TableBackedProgressManager struct {
 	concurrentQueryLimiter *semaphore.Weighted
 }
 
-func NewTableBackedProgressManager(session *gocql.Session, progressTableName string) (*TableBackedProgressManager, error) {
+func NewTableBackedProgressManager(session *gocql.Session, progressTableName string, applicationName string) (*TableBackedProgressManager, error) {
 	tbpm := &TableBackedProgressManager{
 		session:           session,
 		progressTableName: progressTableName,
@@ -91,6 +91,10 @@ func NewTableBackedProgressManager(session *gocql.Session, progressTableName str
 		return nil, err
 	}
 	return tbpm, nil
+}
+
+func (tbpm *TableBackedProgressManager) SetTTL(ttl int32) {
+	tbpm.ttl = ttl
 }
 
 func (tbpm *TableBackedProgressManager) ensureTableExists() error {

@@ -45,13 +45,13 @@ var typesTestCases = []struct {
 			"DELETE v3 FROM %s WHERE pk = 1 AND ck = 4",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v1": scalarOverwrite{int(3)}},
-			{"cdc$operation": OperationType(Update), "v1": scalarOverwrite{int(7)}},
+			{"cdc$operation": OperationType(Insert), "v1": scalarOverwrite{ptrTo(int(3))}},
+			{"cdc$operation": OperationType(Update), "v1": scalarOverwrite{ptrTo(int(7))}},
 			{"cdc$operation": OperationType(Update), "v1": scalarErase{}},
 
-			{"cdc$operation": OperationType(Insert), "v2": scalarOverwrite{"abc"}},
-			{"cdc$operation": OperationType(Update), "v2": scalarOverwrite{"def"}},
-			{"cdc$operation": OperationType(Update), "v2": scalarOverwrite{""}},
+			{"cdc$operation": OperationType(Insert), "v2": scalarOverwrite{ptrTo("abc")}},
+			{"cdc$operation": OperationType(Update), "v2": scalarOverwrite{ptrTo("def")}},
+			{"cdc$operation": OperationType(Update), "v2": scalarOverwrite{ptrTo("")}},
 			{"cdc$operation": OperationType(Update), "v2": scalarErase{}},
 
 			{"cdc$operation": OperationType(Insert), "v3": scalarOverwrite{[]byte{0x12, 0x34}}},
@@ -309,6 +309,13 @@ func TestTypes(t *testing.T) {
 				}
 
 				changeValue, isPresent := change.GetValue(columnName)
+				if !isPresent {
+					t.Errorf("%s[%d]: expected column %s to be present", tc.tableName, i, columnName)
+				}
+				if changeValue == nil {
+					t.Errorf("%s[%d]: column %s is nil", tc.tableName, i, columnName)
+				}
+
 				isDeleted, ok := change.IsDeleted(columnName)
 				if !ok {
 					t.Errorf("%s[%d]: no cdc$deleted_%s column", tc.tableName, i, columnName)
@@ -322,9 +329,7 @@ func TestTypes(t *testing.T) {
 					if isDeleted {
 						t.Errorf("%s[%d]: expected overwrite of %s, but got deletion", tc.tableName, i, columnName)
 					}
-					if !isPresent {
-						t.Errorf("%s[%d]: expected change of %s to be present", tc.tableName, i, columnName)
-					} else if !reflect.DeepEqual(changeValue, v.value) {
+					if !reflect.DeepEqual(changeValue, v.value) {
 						t.Errorf("%s[%d]: expected value of %s to be %#v, but is %#v", tc.tableName, i, columnName, v.value, changeValue)
 					}
 
@@ -332,16 +337,13 @@ func TestTypes(t *testing.T) {
 					if !isDeleted {
 						t.Errorf("%s[%d]: expected %s to be deleted", tc.tableName, i, columnName)
 					}
-					if isPresent {
+					if !reflect.ValueOf(changeValue).IsNil() {
 						t.Errorf("%s[%d]: expected %s to be deleted, but got value %#v", tc.tableName, i, columnName, changeValue)
 					}
 
 				case collectionOverwrite:
 					if !isDeleted {
 						t.Errorf("%s[%d]: expected overwrite of %s, but got append", tc.tableName, i, columnName)
-					}
-					if !isPresent {
-						t.Errorf("%s[%d]: expected elements of %s to be present", tc.tableName, i, columnName)
 					}
 					if !reflect.DeepEqual(changeValue, v.value) {
 						t.Errorf("%s[%d]: expected value of %s to be %#v, but is %#v", tc.tableName, i, columnName, v.value, changeValue)
@@ -369,9 +371,6 @@ func TestTypes(t *testing.T) {
 					if isDeleted {
 						t.Errorf("%s[%d]: expected append of %s, but it is an overwrite", tc.tableName, i, columnName)
 					}
-					if !isPresent {
-						t.Errorf("%s[%d]: expected elements of %s to be present", tc.tableName, i, columnName)
-					}
 					if !reflect.DeepEqual(changeValue, v.values) {
 						t.Errorf("%s[%d]: expected value of %s to be %#v, but is %#v", tc.tableName, i, columnName, v.values, changeValue)
 					}
@@ -385,7 +384,7 @@ func TestTypes(t *testing.T) {
 					if isDeleted {
 						t.Errorf("%s[%d]: expected removal from of %s, but it is an overwrite", tc.tableName, i, columnName)
 					}
-					if isPresent {
+					if !reflect.ValueOf(changeValue).IsNil() {
 						t.Errorf("%s[%d]: expected elements of %s to not be present", tc.tableName, i, columnName)
 					}
 					if !hasDeletedElements {

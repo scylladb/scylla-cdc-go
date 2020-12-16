@@ -508,7 +508,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 				if err := runQuery(deleteStr, vals); err != nil {
 					return err
 				}
-			} else if scalarChange.Value != nil {
+			} else if !reflect.ValueOf(scalarChange.Value).IsNil() {
 				// The column was overwritten
 				updateStr := fmt.Sprintf(
 					"UPDATE %s USING TTL ? SET %s = %s WHERE %s",
@@ -548,7 +548,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 					return err
 				}
 			}
-			if listChange.AppendedElements != nil {
+			if !reflect.ValueOf(listChange.AppendedElements).IsNil() {
 				// TODO: Explain
 				setStr := fmt.Sprintf(
 					"UPDATE %s USING TTL ? SET %s[SCYLLA_TIMEUUID_LIST_INDEX(?)] = %s WHERE %s",
@@ -571,7 +571,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 					}
 				}
 			}
-			if listChange.RemovedElements != nil {
+			if !reflect.ValueOf(listChange.RemovedElements).IsNil() {
 				// TODO: Explain
 				clearStr := fmt.Sprintf(
 					"UPDATE %s SET %s[SCYLLA_TIMEUUID_LIST_INDEX(?)] = null WHERE %s",
@@ -627,7 +627,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 					return err
 				}
 			} else {
-				if added != nil {
+				if !reflect.ValueOf(added).IsNil() {
 					// Add elements
 					addStr := fmt.Sprintf(
 						"UPDATE %s USING TTL ? SET %s = %s + ? WHERE %s",
@@ -642,7 +642,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 						return err
 					}
 				}
-				if removed != nil {
+				if !reflect.ValueOf(removed).IsNil() {
 					// Removed elements
 					remStr := fmt.Sprintf(
 						"UPDATE %s USING TTL ? SET %s = %s - ? WHERE %s",
@@ -768,8 +768,8 @@ func (r *DeltaReplicator) processRangeDelete(ctx context.Context, timestamp int6
 		for _, ckCol := range r.ckColumns {
 
 			// Clustering key values are always atomic
-			ckVal, ok := c.GetValue(ckCol)
-			if !ok {
+			ckVal, _ := c.GetValue(ckCol)
+			if reflect.ValueOf(ckVal).IsNil() {
 				break
 			}
 			ckNames = append(ckNames, ckCol)
@@ -852,7 +852,11 @@ func appendValueByType(vals []interface{}, v interface{}, typ TypeInfo) []interf
 		var vTup []interface{}
 		switch v := v.(type) {
 		case []interface{}:
-			vTup = v
+			if v != nil {
+				vTup = v
+			} else {
+				vTup = make([]interface{}, len(tupTyp.Elements))
+			}
 		case *[]interface{}:
 			if v != nil {
 				vTup = *v
@@ -884,8 +888,8 @@ func appendKeyValuesToBind(
 	// in either partition or clustering key
 	// TODO: Support tuples here, too
 	for _, name := range names {
-		v, ok := c.GetValue(name)
-		if !ok {
+		v, _ := c.GetValue(name)
+		if reflect.ValueOf(v).IsNil() {
 			v = gocql.UnsetValue
 		}
 		vals = append(vals, v)

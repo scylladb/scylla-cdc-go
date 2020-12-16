@@ -59,7 +59,9 @@ func (sbr *streamBatchReader) run(ctx context.Context) (err error) {
 		for s, c := range sbr.consumers {
 			err2 := c.End()
 			if *err == nil {
-				sbr.config.Logger.Printf("error while ending consumer for stream %s (will quit): %s", s, err)
+				if err2 != nil {
+					sbr.config.Logger.Printf("error while ending consumer for stream %s (will quit): %s", StreamID(s), err2)
+				}
 				*err = err2
 			}
 		}

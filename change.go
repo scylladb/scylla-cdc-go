@@ -153,7 +153,7 @@ type SetChange struct {
 	RemovedElements interface{}
 
 	// IsReset tells if the set value was overwritten instead of being
-	// appended to or removed from. If it's true, than AppendedValue will
+	// appended to or removed from. If it's true, than AddedElements will
 	// contain the new state of the set (which can be NULL).
 	IsReset bool
 }
@@ -177,13 +177,14 @@ type MapChange struct {
 	RemovedElements interface{}
 
 	// IsReset tells if the map value was overwritten instead of being
-	// appended to or removed from. If it's true, than AppendedValue will
+	// appended to or removed from. If it's true, than AddedElements will
 	// contain the new state of the map (which can be NULL).
 	IsReset bool
 }
 
-// TODO: document UDTChange
+// UDTChange represents a change to a column of a UDT type.
 type UDTChange struct {
+	// AddedFields contains a map of elements which were written to
 	AddedFields map[string]interface{}
 
 	RemovedFieldsIndices []int16
@@ -202,9 +203,6 @@ func (c *ChangeRow) GetScalarChange(column string) ScalarChange {
 }
 
 func (c *ChangeRow) GetListChange(column string) ListChange {
-	// TODO: Warn about usage with frozen lists
-	// Maybe convert lists to frozen form?
-	// There isn't really a way to do so, though...
 	v, _ := c.GetValue(column)
 	isDeleted, _ := c.IsDeleted(column)
 	deletedElements, _ := c.GetDeletedElements(column)
@@ -243,16 +241,18 @@ func (c *ChangeRow) GetUDTChange(column string) UDTChange {
 	v, _ := c.GetValue(column)
 	typedV, _ := v.(map[string]interface{})
 	colType, _ := c.GetType(column)
-	udtType := colType.(gocql.UDTTypeInfo)
+	udtType, _ := colType.(gocql.UDTTypeInfo)
 	isDeleted, _ := c.IsDeleted(column)
 	deletedElements, _ := c.GetDeletedElements(column)
 
 	typedDeletedElements, _ := deletedElements.([]int16)
-	deletedNames := make([]string, len(typedDeletedElements))
+	deletedNames := make([]string, 0, len(typedDeletedElements))
 
 	// TODO: Protect from indices being outside range
 	for i, el := range typedDeletedElements {
-		deletedNames[i] = udtType.Elements[el].Name
+		if i < len(udtType.Elements) {
+			deletedNames = append(deletedNames, udtType.Elements[el].Name)
+		}
 	}
 
 	udtC := UDTChange{
@@ -281,7 +281,7 @@ func (c *ChangeRow) GetValue(columnName string) (interface{}, bool) {
 	if !ok {
 		return nil, false
 	}
-	return c.data[idx], c.data[idx] != nil
+	return c.data[idx], true
 }
 
 // IsDeleted returns a boolean indicating if given column was set to null.
@@ -633,8 +633,8 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 			// To represent a field, use value returned by gocql's TypeInfo.New(),
 			// but convert it into a pointer
 			ci.fieldNameToIdx[col.Name] = colIdx
-			for _, el := range tupTyp.Elems {
-				ci.columnValues = append(ci.columnValues, reflect.New(reflect.TypeOf(el.New())).Interface())
+			for range tupTyp.Elems {
+				ci.columnValues = append(ci.columnValues, &withNullUnmarshaler{})
 			}
 		} else {
 			var cval interface{}
@@ -657,16 +657,7 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 
 			default:
 				if !strings.HasPrefix(col.Name, "cdc$deleted_") {
-					if col.TypeInfo.Type() == gocql.TypeUDT {
-						// For UDT fields, use udtWithNulls. It wraps
-						// a map[string]interface{} and for each its field,
-						// it keeps a pointer-to-value instead of keeping
-						// a value directly.
-						cval = new(udtWithNulls)
-					} else {
-						// All non-cdc fields should be nullable
-						cval = reflect.New(reflect.TypeOf(col.TypeInfo.New())).Interface()
-					}
+					cval = &withNullUnmarshaler{}
 				} else {
 					// For cdc$deleted_X and cdc$deleted_elements_X, we can use
 					// the type that gocql chooses for us
@@ -723,23 +714,20 @@ func (ci *changeRowIterator) Next() (cdcChangeBatchCols, *ChangeRow) {
 			if ci.tupleWriteTimes[tupIdx] != 0 {
 				v := make([]interface{}, tupLen)
 				for i := 0; i < tupLen; i++ {
-					vv := reflect.Indirect(reflect.ValueOf(ci.columnValues[pos+i])).Interface()
+					vv := ci.columnValues[pos+i].(*withNullUnmarshaler).value
 					v[i] = adjustBytes(vv)
 				}
 				change.data[idxInSlice] = v
+			} else {
+				change.data[idxInSlice] = ([]interface{})(nil)
 			}
 			pos += tupLen
-		} else if col.TypeInfo.Type() == gocql.TypeUDT {
-			v := ci.columnValues[pos].(*udtWithNulls)
-			if v != nil {
-				change.data[idxInSlice] = v.fields
-				v.fields = nil
-			}
-			pos++
 		} else {
-			v, notNull := maybeDereferenceTwice(ci.columnValues[pos])
-			if notNull {
-				change.data[idxInSlice] = adjustBytes(v)
+			v, isWithNull := ci.columnValues[pos].(*withNullUnmarshaler)
+			if isWithNull {
+				change.data[idxInSlice] = v.value
+			} else {
+				change.data[idxInSlice] = dereference(ci.columnValues[pos])
 			}
 			pos++
 		}
@@ -751,15 +739,8 @@ func (ci *changeRowIterator) Close() error {
 	return ci.iter.Close()
 }
 
-func maybeDereferenceTwice(i interface{}) (interface{}, bool) {
-	v := reflect.Indirect(reflect.ValueOf(i))
-	if v.Kind() != reflect.Ptr {
-		return v.Interface(), true
-	}
-	if v.IsNil() {
-		return nil, false
-	}
-	return reflect.Indirect(v).Interface(), true
+func dereference(i interface{}) interface{} {
+	return reflect.Indirect(reflect.ValueOf(i)).Interface()
 }
 
 // Converts a v1 UUID to a Cassandra timestamp.
@@ -767,6 +748,130 @@ func maybeDereferenceTwice(i interface{}) (interface{}, bool) {
 // Cassandra timestamp is measured in milliseconds since 00:00:00.00, 1 January 1970.
 func timeuuidToTimestamp(from gocql.UUID) int64 {
 	return (from.Timestamp() - 0x01b21dd213814000) / 10
+}
+
+type withNullUnmarshaler struct {
+	value interface{}
+}
+
+func (wnu *withNullUnmarshaler) UnmarshalCQL(info gocql.TypeInfo, data []byte) error {
+	switch info.Type() {
+	case gocql.TypeUDT:
+		// UDTs are unmarshaled as map[string]interface{}
+		// Returned map is nil iff the whole UDT value was nil
+		if data == nil {
+			wnu.value = (map[string]interface{})(nil)
+			return nil
+		}
+		udtInfo := info.(gocql.UDTTypeInfo)
+		uwn := udtWithNulls{make(map[string]interface{}, len(udtInfo.Elements))}
+		if err := gocql.Unmarshal(info, data, &uwn); err != nil {
+			return err
+		}
+		wnu.value = uwn.fields
+		return nil
+
+	case gocql.TypeTuple:
+		// Tuples are unmarshaled as []interface{}
+		// Returned slice is nil iff the whole tuple is nil
+		if data == nil {
+			wnu.value = ([]interface{})(nil)
+			return nil
+		}
+
+		// Make a tuple with withNullMarshallers
+		tupInfo := info.(gocql.TupleTypeInfo)
+		tupValue := make([]interface{}, len(tupInfo.Elems))
+		for i := range tupValue {
+			tupValue[i] = &withNullUnmarshaler{}
+		}
+
+		if err := gocql.Unmarshal(info, data, tupValue); err != nil {
+			return err
+		}
+
+		// Unwrap tuple values
+		for i := range tupValue {
+			tupValue[i] = tupValue[i].(*withNullUnmarshaler).value
+		}
+		wnu.value = tupValue
+		return nil
+
+	case gocql.TypeList, gocql.TypeSet:
+		if data == nil {
+			wnu.value = reflect.ValueOf(info.New()).Elem().Interface()
+			return nil
+		}
+
+		// Make a list with withNullMarshallers
+		var lWnm []withNullUnmarshaler
+		if err := gocql.Unmarshal(info, data, &lWnm); err != nil {
+			return err
+		}
+
+		lV := reflect.ValueOf(info.New()).Elem()
+		for _, wnm := range lWnm {
+			lV.Set(reflect.Append(lV, reflect.ValueOf(wnm.derefForListOrMap())))
+		}
+		wnu.value = lV.Interface()
+		return nil
+
+	case gocql.TypeMap:
+		if data == nil {
+			wnu.value = reflect.ValueOf(info.New()).Elem().Interface()
+			return nil
+		}
+
+		// Make a map with withNullMarshallers
+		mapInfo := info.(gocql.CollectionType)
+		keyType := reflect.TypeOf(mapInfo.Key.New()).Elem()
+		mapWithWnuType := reflect.MapOf(keyType, reflect.TypeOf(withNullUnmarshaler{}))
+		mapWithWnuPtr := reflect.New(mapWithWnuType)
+		mapWithWnuPtr.Elem().Set(reflect.MakeMap(mapWithWnuType))
+		if err := gocql.Unmarshal(info, data, mapWithWnuPtr.Interface()); err != nil {
+			return err
+		}
+
+		resultMapType := reflect.TypeOf(info.New()).Elem()
+		resultMap := reflect.MakeMap(resultMapType)
+		iter := mapWithWnuPtr.Elem().MapRange()
+		for iter.Next() {
+			unwrapped := iter.Value().Interface().(withNullUnmarshaler)
+			resultMap.SetMapIndex(iter.Key(), reflect.ValueOf(unwrapped.derefForListOrMap()))
+		}
+		wnu.value = resultMap.Interface()
+		return nil
+
+	case gocql.TypeBlob:
+		if data == nil {
+			wnu.value = ([]byte)(nil)
+			return nil
+		}
+
+		slice := make([]byte, 0)
+		if err := gocql.Unmarshal(info, data, &slice); err != nil {
+			return err
+		}
+		wnu.value = slice
+		return nil
+
+	default:
+		vptr := reflect.New(reflect.TypeOf(info.New()))
+		if err := gocql.Unmarshal(info, data, vptr.Interface()); err != nil {
+			return err
+		}
+
+		wnu.value = vptr.Elem().Interface()
+		return nil
+	}
+}
+
+func (wnu *withNullUnmarshaler) derefForListOrMap() interface{} {
+	v := reflect.ValueOf(wnu.value)
+	if v.Kind() == reflect.Ptr {
+		return v.Elem().Interface()
+	}
+	return wnu.value
 }
 
 // A wrapper over map[string]interface{} which is used to deserialize UDTs.
