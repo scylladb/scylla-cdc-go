@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -60,26 +61,45 @@ var typesTestCases = []struct {
 			{"cdc$operation": OperationType(Update), "v3": scalarErase{}},
 		},
 	},
-	// {
-	// 	"ks.types_lists",
-	// 	"CREATE TABLE %s (pk int, ck int, v list<int>, PRIMARY KEY (pk, ck))",
-	// 	[]string{
-	// 		"INSERT INTO %s (pk, ck, v) VALUES (1, 1, [1, 2, 3])",
-	// 		"UPDATE %s SET v = [4, 5, 6] WHERE pk = 1 AND ck = 1",
-	// 		"UPDATE %s SET v = v + [7, 8, 9] WHERE pk = 1 AND ck = 1",
-	// 		"UPDATE %s SET v = [-2, -1, 0] + v WHERE pk = 1 AND ck = 1",
-	// 		"UPDATE %s SET v = v - [5, 6, 7, 8] WHERE pk = 1 AND ck = 1",
-	// 		"DELETE v FROM %s WHERE pk = 1 AND ck = 1",
-	// 	},
-	// 	[]change{
-	// 		{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{[]int{1, 2, 3}}},
-	// 		{"cdc$operation": OperationType(Update), "v": collectionOverwrite{[]int{4, 5, 6}}},
-	// 		{"cdc$operation": OperationType(Update)}, // TODO: Test this one (addition)
-	// 		{"cdc$operation": OperationType(Update)}, // TODO: Test this one (addition)
-	// 		{"cdc$operation": OperationType(Update)}, // TODO: Test this one (removal)
-	// 		{"cdc$operation": OperationType(Update), "v": collectionErase{}},
-	// 	},
-	// },
+	{
+		"ks.types_lists",
+		"CREATE TABLE %s (pk int, ck int, v list<int>, PRIMARY KEY (pk, ck))",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, [1, 2, 3])",
+			"UPDATE %s SET v = [4, 5, 6] WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = v + [7, 8, 9] WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = [-2, -1, 0] + v WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = v - [5, 6, 7, 8] WHERE pk = 1 AND ck = 1",
+			"DELETE v FROM %s WHERE pk = 1 AND ck = 1",
+		},
+		[]change{
+			{"cdc$operation": OperationType(Insert), "v": listOverwrite{[]int{1, 2, 3}}},
+			{"cdc$operation": OperationType(Update), "v": listOverwrite{[]int{4, 5, 6}}},
+			{"cdc$operation": OperationType(Update), "v": listAddition{[]int{7, 8, 9}}},
+			{"cdc$operation": OperationType(Update), "v": listAddition{[]int{-2, -1, 0}}},
+			{"cdc$operation": OperationType(Update), "v": listRemoval{4}},
+			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
+		},
+	}, {
+		"ks.types_lists_with_tuples",
+		"CREATE TABLE %s (pk int, ck int, v list<frozen<tuple<int, text>>>, PRIMARY KEY (pk, ck))",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, [(1, 'abc'), (2, 'def')])",
+			"UPDATE %s SET v = [(null, 'ghi'), (4, null)] WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = v + [(5, 'mno')] WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = [(6, 'pqr')] + v WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = v - [(5, 'mno'), (6, 'pqr')] WHERE pk = 1 AND ck = 1",
+			"DELETE v FROM %s WHERE pk = 1 AND ck = 1",
+		},
+		[]change{
+			{"cdc$operation": OperationType(Insert), "v": listOverwrite{[][]interface{}{{ptrTo(1), ptrTo("abc")}, {ptrTo(2), ptrTo("def")}}}},
+			{"cdc$operation": OperationType(Update), "v": listOverwrite{[][]interface{}{{(*int)(nil), ptrTo("ghi")}, {ptrTo(4), (*string)(nil)}}}},
+			{"cdc$operation": OperationType(Update), "v": listAddition{[][]interface{}{{ptrTo(5), ptrTo("mno")}}}},
+			{"cdc$operation": OperationType(Update), "v": listAddition{[][]interface{}{{ptrTo(6), ptrTo("pqr")}}}},
+			{"cdc$operation": OperationType(Update), "v": listRemoval{2}},
+			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
+		},
+	},
 	{
 		"ks.types_maps",
 		"CREATE TABLE %s (pk int, ck int, v map<int, text>, PRIMARY KEY (pk, ck))",
@@ -117,6 +137,24 @@ var typesTestCases = []struct {
 		},
 	},
 	{
+		"ks.types_sets_of_udts",
+		"CREATE TABLE %s (pk int, ck int, v set<frozen<ks.udt>>, PRIMARY KEY (pk, ck))",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, {(1, 'abc'), (2, 'def')})",
+			"UPDATE %s SET v = {(null, 'ghi'), (4, null)} WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = v + {(5, 'mno')} WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = v - {(5, 'mno')} WHERE pk = 1 AND ck = 1",
+			"DELETE v FROM %s WHERE pk = 1 AND ck = 1",
+		},
+		[]change{
+			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{[]map[string]interface{}{{"a": ptrTo(1), "b": ptrTo("abc")}, {"a": ptrTo(2), "b": ptrTo("def")}}}},
+			{"cdc$operation": OperationType(Update), "v": collectionOverwrite{[]map[string]interface{}{{"a": (*int)(nil), "b": ptrTo("ghi")}, {"a": ptrTo(4), "b": (*string)(nil)}}}},
+			{"cdc$operation": OperationType(Update), "v": collectionAddition{[]map[string]interface{}{{"a": ptrTo(5), "b": ptrTo("mno")}}}},
+			{"cdc$operation": OperationType(Update), "v": collectionRemoval{[]map[string]interface{}{{"a": ptrTo(5), "b": ptrTo("mno")}}}},
+			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
+		},
+	},
+	{
 		"ks.types_tuples",
 		"CREATE TABLE %s (pk int, ck int, v tuple<int, text>, PRIMARY KEY (pk, ck))",
 		[]string{
@@ -146,6 +184,28 @@ var typesTestCases = []struct {
 			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{(*int)(nil), ptrTo("")}}},
 			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{(*int)(nil), (*string)(nil)}}},
 			{"cdc$operation": OperationType(Update), "v": scalarErase{}},
+		},
+	},
+	{
+		"ks.types_tuples_in_tuples",
+		"CREATE TABLE %s (pk int, ck int, v tuple<tuple<int, text>, int>, PRIMARY KEY (pk, ck))",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, ((1, 'abc'), 7))",
+
+			"UPDATE %s SET v = ((100, 'zyx'), 111) WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = null WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = ((200, null), 999) WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = ((300, ''), 333) WHERE pk = 1 AND ck = 1",
+			"UPDATE %s SET v = (null, 444) WHERE pk = 1 AND ck = 1",
+		},
+		[]change{
+			{"cdc$operation": OperationType(Insert), "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(1), ptrTo("abc")}, ptrTo(7)}}},
+
+			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(100), ptrTo("zyx")}, ptrTo(111)}}},
+			{"cdc$operation": OperationType(Update), "v": scalarErase{}},
+			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(200), (*string)(nil)}, ptrTo(999)}}},
+			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(300), ptrTo("")}, ptrTo(333)}}},
+			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{([]interface{})(nil), ptrTo(444)}}},
 		},
 	},
 	{
@@ -188,6 +248,24 @@ var typesTestCases = []struct {
 			{"cdc$operation": OperationType(Update), "v": udtSetFields{map[string]interface{}{"a": (*int)(nil), "b": (*string)(nil)}, []int16{1}}},
 		},
 	},
+	{
+		"ks.types_nested_udts",
+		"CREATE TABLE %s (pk int, ck int, v ks.udt_nested, PRIMARY KEY (pk, ck))",
+		[]string{
+			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, ((2, 'abc'), 3))",
+			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, ((null, 'abc'), null))",
+			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, (null, 3))",
+			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, (null, null))",
+			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, null)",
+		},
+		[]change{
+			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": map[string]interface{}{"a": ptrTo(2), "b": ptrTo("abc")}, "b": ptrTo(3)}}},
+			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": map[string]interface{}{"a": (*int)(nil), "b": ptrTo("abc")}, "b": (*int)(nil)}}},
+			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": (map[string]interface{})(nil), "b": ptrTo(3)}}},
+			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": (map[string]interface{})(nil), "b": (*int)(nil)}}},
+			{"cdc$operation": OperationType(Insert), "v": collectionErase{}},
+		},
+	},
 }
 
 type scalarOverwrite struct {
@@ -204,6 +282,18 @@ type collectionAddition struct {
 }
 type collectionRemoval struct {
 	values interface{}
+}
+
+type listOverwrite struct {
+	values interface{}
+}
+type listAddition struct {
+	values interface{}
+}
+type listRemoval struct {
+	// With deltas, it's impossible to tell which values were removed,
+	// so we may only check the count
+	elementCount int
 }
 
 type udtSetFields struct {
@@ -247,6 +337,7 @@ func TestTypes(t *testing.T) {
 	execQuery(t, session, "CREATE KEYSPACE ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}")
 
 	execQuery(t, session, "CREATE TYPE ks.udt (a int, b text)")
+	execQuery(t, session, "CREATE TYPE ks.udt_nested (a frozen<ks.udt>, b int)")
 
 	for _, tc := range typesTestCases {
 		execQuery(t, session, fmt.Sprintf(tc.schema, tc.tableName)+" WITH cdc = {'enabled': true, 'preimage': true, 'postimage': true}")
@@ -393,6 +484,45 @@ func TestTypes(t *testing.T) {
 						t.Errorf("%s[%d]: expected %s deleted elements to be %#v, but is %#v", tc.tableName, i, columnName, v.values, deletedElements)
 					}
 
+				case listOverwrite:
+					if !isDeleted {
+						t.Errorf("%s[%d]: expected %s to be deleted", tc.tableName, i, columnName)
+					}
+
+					checkList(t, tc.tableName, columnName, i, changeValue, v.values)
+
+					if !hasDeletedElements {
+						t.Errorf("%s[%d]: expected %s to have deleted elements column", tc.tableName, i, columnName)
+					} else if !reflect.ValueOf(deletedElements).IsNil() {
+						t.Errorf("%s[%d]: expected %s deleted elements to be nil, but is %#v", tc.tableName, i, columnName, deletedElements)
+					}
+
+				case listAddition:
+					if isDeleted {
+						t.Errorf("%s[%d]: expected append of %s, but it is an overwrite", tc.tableName, i, columnName)
+					}
+
+					checkList(t, tc.tableName, columnName, i, changeValue, v.values)
+
+					if !hasDeletedElements {
+						t.Errorf("%s[%d]: expected %s to have deleted elements column", tc.tableName, i, columnName)
+					} else if !reflect.ValueOf(deletedElements).IsNil() {
+						t.Errorf("%s[%d]: expected %s deleted elements to be nil, but is %#v", tc.tableName, i, columnName, deletedElements)
+					}
+
+				case listRemoval:
+					if isDeleted {
+						t.Errorf("%s[%d]: expected removal from of %s, but it is an overwrite", tc.tableName, i, columnName)
+					}
+					if !reflect.ValueOf(changeValue).IsNil() {
+						t.Errorf("%s[%d]: expected elements of %s to not be present", tc.tableName, i, columnName)
+					}
+					if !hasDeletedElements {
+						t.Errorf("%s[%d]: expected %s to have deleted elements column", tc.tableName, i, columnName)
+					} else if reflect.ValueOf(deletedElements).Len() != v.elementCount {
+						t.Errorf("%s[%d]: expected %s deleted elements to have %d elements, but has %d", tc.tableName, i, columnName, v.elementCount, reflect.ValueOf(deletedElements).Len())
+					}
+
 				case udtSetFields:
 					if isDeleted {
 						t.Errorf("%s[%d]: expected udt fields set/remove from %s, but it is an overwrite", tc.tableName, i, columnName)
@@ -409,6 +539,39 @@ func TestTypes(t *testing.T) {
 				case notSet:
 					// TODO
 				}
+			}
+		}
+	}
+}
+
+func checkList(t *testing.T, tableName string, columnName string, rowNum int, actual interface{}, expected interface{}) {
+	// Sort values by their timeuuid
+	type cell struct {
+		key   gocql.UUID
+		value interface{}
+	}
+
+	var asList []cell
+	iter := reflect.ValueOf(actual).MapRange()
+	for iter.Next() {
+		asList = append(asList, cell{
+			key:   iter.Key().Interface().(gocql.UUID),
+			value: iter.Value().Interface(),
+		})
+	}
+
+	sort.Slice(asList, func(i, j int) bool {
+		return compareTimeuuid(asList[i].key, asList[j].key) < 0
+	})
+
+	rExpected := reflect.ValueOf(expected)
+	if len(asList) != rExpected.Len() {
+		t.Errorf("%s[%d]: expected %s to have %d elements, but has %d", tableName, rowNum, columnName, rExpected.Len(), len(asList))
+	} else {
+		for j := 0; j < rExpected.Len(); j++ {
+			el := rExpected.Index(j).Interface()
+			if !reflect.DeepEqual(asList[j].value, el) {
+				t.Errorf("%s[%d]: expected value at index %d in %s to be %v, but is %v", tableName, rowNum, j, columnName, el, asList[j].value)
 			}
 		}
 	}

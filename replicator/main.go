@@ -70,7 +70,7 @@ func main() {
 	fmt.Printf("  Query window size: %s\n", adv.QueryTimeWindowSize)
 	fmt.Printf("  Delay after poll with empty results: %s\n", adv.PostEmptyQueryDelay)
 	fmt.Printf("  Delay after poll with non-empty results: %s\n", adv.PostNonEmptyQueryDelay)
-	fmt.Printf("  Delay after failed poll: %s\n", adv.PostEmptyQueryDelay)
+	fmt.Printf("  Delay after failed poll: %s\n", adv.PostFailedQueryDelay)
 
 	var fullyQualifiedTables []string
 

@@ -291,7 +291,8 @@ func (c *ChangeRow) IsDeleted(columnName string) (bool, bool) {
 	if !ok {
 		return false, false
 	}
-	return v.(bool), true
+	vb := v.(*bool)
+	return vb != nil && *vb, true
 }
 
 // GetDeletedElements returns which elements were deleted from the non-atomic column.
@@ -656,13 +657,7 @@ func newChangeRowIterator(iter *gocql.Iter, tupleNames []string) (*changeRowIter
 				cval = &ci.cdcChangeRowCols.endOfBatch
 
 			default:
-				if !strings.HasPrefix(col.Name, "cdc$deleted_") {
-					cval = &withNullUnmarshaler{}
-				} else {
-					// For cdc$deleted_X and cdc$deleted_elements_X, we can use
-					// the type that gocql chooses for us
-					cval = col.TypeInfo.New()
-				}
+				cval = &withNullUnmarshaler{}
 			}
 			ci.fieldNameToIdx[col.Name] = colIdx
 			ci.columnValues = append(ci.columnValues, cval)
@@ -883,17 +878,14 @@ type udtWithNulls struct {
 }
 
 func (uwn *udtWithNulls) UnmarshalUDT(name string, info gocql.TypeInfo, data []byte) error {
-	// info.New() returns a pointer to a value, therefore ptr is a double pointer (**T)
-	ptr := reflect.New(reflect.TypeOf(info.New())).Interface()
-	if err := gocql.Unmarshal(info, data, ptr); err != nil {
+	var wnu withNullUnmarshaler
+	if err := gocql.Unmarshal(info, data, &wnu); err != nil {
 		return err
 	}
 	if uwn.fields == nil {
 		uwn.fields = make(map[string]interface{})
 	}
-	// vv is *T
-	vv := reflect.Indirect(reflect.ValueOf(ptr)).Interface()
-	uwn.fields[name] = adjustBytes(vv)
+	uwn.fields[name] = wnu.value
 	return nil
 }
 
