@@ -1,4 +1,4 @@
-package scylla_cdc
+package scyllacdc
 
 import (
 	"context"
@@ -320,7 +320,7 @@ func TestTypes(t *testing.T) {
 		PostEmptyQueryDelay:    3 * time.Second,
 		PostFailedQueryDelay:   3 * time.Second,
 		QueryTimeWindowSize:    5 * time.Minute,
-		ConfidenceWindowSize:   0,
+		ConfidenceWindowSize:   time.Millisecond,
 	}
 
 	// Configure a session
@@ -353,14 +353,13 @@ func TestTypes(t *testing.T) {
 	}
 
 	// Configuration for the CDC reader
-	cfg := NewReaderConfig(
-		session,
-		factory,
-		&NoProgressManager{},
-		tableNames...,
-	)
-	cfg.Advanced = adv
-	cfg.Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
+	cfg := &ReaderConfig{
+		Session:               session,
+		ChangeConsumerFactory: factory,
+		TableNames:            tableNames,
+		Advanced:              adv,
+		Logger:                log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
+	}
 
 	reader, err := NewReader(context.Background(), cfg)
 	if err != nil {

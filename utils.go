@@ -1,4 +1,4 @@
-package scylla_cdc
+package scyllacdc
 
 import (
 	"context"
@@ -10,34 +10,42 @@ import (
 	"github.com/gocql/gocql"
 )
 
-// TODO: Better name, clashes with ProgressReporter
+// PeriodicProgressReporter is a wrapper around ProgressReporter which can be
+// used to save progress in regular periods of time.
 type PeriodicProgressReporter struct {
 	reporter *ProgressReporter
-	period   time.Duration
+	interval time.Duration
 
 	refreshCh    chan struct{}
 	stopCh       chan struct{}
 	finishCh     chan struct{}
 	mu           *sync.Mutex
 	timeToReport gocql.UUID
+
+	logger Logger
 }
 
-func NewPeriodicProgressReporter(period time.Duration, reporter *ProgressReporter) *PeriodicProgressReporter {
+// NewPeriodicProgressReporter creates a new PeriodicProgressReporter with
+// given report interval.
+func NewPeriodicProgressReporter(logger Logger, interval time.Duration, reporter *ProgressReporter) *PeriodicProgressReporter {
 	return &PeriodicProgressReporter{
 		reporter: reporter,
-		period:   period,
+		interval: interval,
 
 		refreshCh: make(chan struct{}, 1),
 		stopCh:    make(chan struct{}),
 		finishCh:  make(chan struct{}),
 		mu:        &sync.Mutex{},
+
+		logger: logger,
 	}
 }
 
+// Start spawns an internal goroutine and starts the progress reporting loop.
 func (ppr *PeriodicProgressReporter) Start(ctx context.Context) {
 	// Optimization: if the reporter is nil, or is NoProgressManager,
 	// then don't start the goroutine at all.
-	if _, ok := ppr.reporter.progressManager.(*NoProgressManager); ok {
+	if _, ok := ppr.reporter.progressManager.(noProgressManager); ok {
 		close(ppr.finishCh)
 		return
 	}
@@ -47,7 +55,7 @@ func (ppr *PeriodicProgressReporter) Start(ctx context.Context) {
 		for {
 			// Wait for the duration period
 			select {
-			case <-time.After(ppr.period):
+			case <-time.After(ppr.interval):
 
 			case <-ctx.Done():
 				return
@@ -63,7 +71,10 @@ func (ppr *PeriodicProgressReporter) Start(ctx context.Context) {
 				ppr.mu.Unlock()
 
 				// TODO: Log errors?
-				_ = ppr.reporter.MarkProgress(ctx, Progress{timeToReport})
+				err := ppr.reporter.MarkProgress(ctx, Progress{timeToReport})
+				if err != nil {
+					ppr.logger.Printf("failed to save progress for %s: %s", ppr.reporter.streamID, err)
+				}
 
 			case <-ctx.Done():
 				return
@@ -74,6 +85,7 @@ func (ppr *PeriodicProgressReporter) Start(ctx context.Context) {
 	}()
 }
 
+// Update tells the PeriodicProgressReporter that a row has been processed.
 func (ppr *PeriodicProgressReporter) Update(newTime gocql.UUID) {
 	ppr.mu.Lock()
 	ppr.timeToReport = newTime
@@ -86,16 +98,30 @@ func (ppr *PeriodicProgressReporter) Update(newTime gocql.UUID) {
 	}
 }
 
+// Stop stops inner goroutine and waits until it finishes.
 func (ppr *PeriodicProgressReporter) Stop() {
 	close(ppr.stopCh)
+	<-ppr.finishCh
 }
 
+// SaveAndStop stops inner goroutine, waits until it finishes, and then
+// saves the most recent progress.
 func (ppr *PeriodicProgressReporter) SaveAndStop(ctx context.Context) error {
 	close(ppr.stopCh)
 	<-ppr.finishCh
 
 	// No need to lock the mutex for timeToReport
-	return ppr.reporter.MarkProgress(ctx, Progress{ppr.timeToReport})
+	if (ppr.timeToReport == gocql.UUID{}) {
+		return nil
+	}
+
+	err := ppr.reporter.MarkProgress(ctx, Progress{ppr.timeToReport})
+	if err != nil {
+		ppr.logger.Printf("failed to save progress for %s: %s", ppr.reporter.streamID, err)
+	} else {
+		ppr.logger.Printf("successfully saved final progress for %s: %s (%s)", ppr.reporter.streamID, ppr.timeToReport, ppr.timeToReport.Time())
+	}
+	return err
 }
 
 func compareTimeuuid(u1 gocql.UUID, u2 gocql.UUID) int {
