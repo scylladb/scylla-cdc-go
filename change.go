@@ -1,4 +1,4 @@
-package scylla_cdc
+package scyllacdc
 
 import (
 	"context"
@@ -10,6 +10,11 @@ import (
 	"github.com/gocql/gocql"
 )
 
+// OperationType corresponds to the cdc$operation column in CDC log, and
+// describes the type of the operation given row represents.
+//
+// For a comprehensive explanation of what each operation type means,
+// see Scylla documentation about CDC.
 type OperationType int8
 
 const (
@@ -25,6 +30,7 @@ const (
 	PostImage                               = 9
 )
 
+// String is needed to implement the fmt.Stringer interface.
 func (ot OperationType) String() string {
 	switch ot {
 	case PreImage:
@@ -52,22 +58,64 @@ func (ot OperationType) String() string {
 	}
 }
 
+// Change represents a group of rows from CDC log with the same cdc$stream_id
+// and cdc$time timestamp.
 type Change struct {
-	StreamID  []byte
-	Time      gocql.UUID
-	Preimage  []*ChangeRow
-	Delta     []*ChangeRow
-	Postimage []*ChangeRow
+	// Corresponds to cdc$stream_id.
+	StreamID StreamID
+
+	// Corresponds to cdc$time.
+	Time gocql.UUID
+
+	// PreImage rows of the group.
+	PreImage []*ChangeRow
+
+	// Delta rows of the group.
+	Delta []*ChangeRow
+
+	// PostImage rows of the group.
+	PostImage []*ChangeRow
 }
 
 // GetCassandraTimestamp returns a timestamp of the operation
 // suitable to put as a TIMESTAMP parameter to a DML statement
-// (INSERT, UPDATE, DELETE)
+// (INSERT, UPDATE, DELETE).
 func (c *Change) GetCassandraTimestamp() int64 {
 	return timeuuidToTimestamp(c.Time)
 }
 
-// ChangeRow corresponds to a single row from the cdc log
+// ChangeRow corresponds to a single row from the CDC log.
+//
+// The ChangeRow uses a slightly different representation of values than gocql's
+// MapScan in order to faithfully represent nullability of all values:
+//
+// Scalar types such as int, text etc. are represented by a pointer to
+// their counterpart in gocql (in this case, *int and *string). The only
+// exception is the blob, which is encoded as []byte slice - if the column
+// was nil, then it will contain a nil slice, if the column was not nil but
+// just empty, then the resulting slice will be empty, but not nil.
+//
+// Tuple types are always represented as an []interface{} slice of values
+// in this representation (e.g. tuple<int, text> will contain an *int and
+// a *string). If the tuple itself was null, then it will be represented
+// as a nil []interface{} slice.
+//
+// Lists and sets are represented as slices of the corresponding type.
+// Because lists and sets cannot contain nils, if a value was to be
+// represented as a pointer, it will be represented as a value instead.
+// For example, list<int> becomes []int, but list<frozen<tuple<int, text>>
+// becomes [][]interface{} because the tuple type cannot be flattened.
+//
+// Maps are represented as map[K]V, where K and V are in the "flattened" form
+// as lists and sets.
+//
+// UDTs are represented as map[string]interface{}, with values fields being
+// represented as described here. For example, a UDT with fields (a int,
+// b text) will be represented as a map with two values of types (*int)
+// and (*string).
+//
+// For a comprehensive guide on how to interpret data in the CDC log,
+// see Scylla documentation about CDC.
 type ChangeRow struct {
 	fieldNameToIdx map[string]int
 
@@ -93,35 +141,35 @@ type cdcChangeRowCols struct {
 	endOfBatch bool
 }
 
-// ScalarChange represents a change to a column of native type, or a frozen
-// type.
-type ScalarChange struct {
+// AtomicChange represents a change to a column of an atomic or a frozen type.
+type AtomicChange struct {
 	// Value contains the scalar value of the column.
 	// If the column was not changed or was deleted, it will be nil.
 	//
-	// Type: T or nil interface.
+	// Type: T.
 	Value interface{}
 
 	// IsDeleted tells if this column was set to NULL by this change.
 	IsDeleted bool
 }
 
-// ListChange represents a change to a column
+// ListChange represents a change to a column of a type list<T>.
 type ListChange struct {
 	// AppendedElements contains values appended to the list in the form
 	// of map from cell timestamps to values.
-	// If there were no appended values, it can be nil.
-	// For more information about how to interpret it, see README and examples.
-	// TODO: Actually document it in README and examples
 	//
-	// Type: map[gocql.UUID]T, if there were any elements appended, or nil
-	// interface.
+	// For more information about how to interpret it, see "Advanced column"
+	// types" in the CDC documentation.
+	//
+	// Type: map[gocql.UUID]T
 	AppendedElements interface{}
 
-	// TODO: Document, it's not really clear what it is without context,
-	// and it's not very easy to use
+	// RemovedElements contains indices of the removed elements.
 	//
-	// Type: []gocql.UUID if there were any elements removed, or nil interface.
+	// For more information about how to interpret it, see "Advanced column"
+	// types" in the CDC documentation.
+	//
+	// Type: []gocql.UUID
 	RemovedElements []gocql.UUID
 
 	// IsReset tells if the list value was overwritten instead of being
@@ -135,21 +183,21 @@ type SetChange struct {
 	// AddedElements contains a slice of values which were added to the set
 	// by the operation. If there were any values added, it will contain
 	// a slice of form []T, where T is gocql's representation of the element
-	// type. If there were no values added, this field can contain a nil
-	// interface.
+	// type.
 	//
-	// Type: []T, if there were any elements added, or nil interface.
+	// Type: []T
 	AddedElements interface{}
 
 	// RemovedElements contains a slice of values which were removed from the set
 	// by the operation. Like AddedValues, it's either a slice or a nil
 	// interface.
+	//
 	// Please note that if the operation overwrote the old value of the set
 	// instead of adding/removing elements, this field _will be nil_.
 	// Instead, IsReset field will be set, and AddedValues will contain
 	// the new state of the set.
 	//
-	// Type: []T, if there were any elements removed, or nil interface.
+	// Type: []T
 	RemovedElements interface{}
 
 	// IsReset tells if the set value was overwritten instead of being
@@ -163,7 +211,7 @@ type MapChange struct {
 	// AddedElements contains a map of elements which were added to the map
 	// by the operation.
 	//
-	// Type: map[K]V, if there were any added values, or nil interface.
+	// Type: map[K]V.
 	AddedElements interface{}
 
 	// RemovedElements contains a slice of keys which were removed from the map
@@ -173,7 +221,7 @@ type MapChange struct {
 	// Instead, IsReset field will be set, and AddedValues will contain
 	// the new state of the map.
 	//
-	// Type: []K, if there were any indices removed, or nil interface.
+	// Type: []K
 	RemovedElements interface{}
 
 	// IsReset tells if the map value was overwritten instead of being
@@ -184,24 +232,37 @@ type MapChange struct {
 
 // UDTChange represents a change to a column of a UDT type.
 type UDTChange struct {
-	// AddedFields contains a map of elements which were written to
+	// AddedFields contains a map of fields. Non-null value of a field
+	// indicate that the field was written to, otherwise it was not written.
 	AddedFields map[string]interface{}
 
-	RemovedFieldsIndices []int16
-	RemovedFields        []string
+	// RemovedFields contains names of fields which were set to null
+	// by this operation.
+	RemovedFields []string
 
+	// RemovedFieldsIndices contains indices of tields which were set to null
+	// by this operation.
+	RemovedFieldsIndices []int16
+
+	// IsReset tells if the UDT was overwritten instead of only some fields
+	// being overwritten. If this flag is true, then nil fields in AddedFields
+	// will mean that those fields should be set to null.
 	IsReset bool
 }
 
-func (c *ChangeRow) GetScalarChange(column string) ScalarChange {
+// GetAtomicChange returns a ScalarChange struct for a given column.
+// Results are undefined if the column in the base table was not an atomic type.
+func (c *ChangeRow) GetAtomicChange(column string) AtomicChange {
 	v, _ := c.GetValue(column)
 	isDeleted, _ := c.IsDeleted(column)
-	return ScalarChange{
+	return AtomicChange{
 		Value:     v,
 		IsDeleted: isDeleted,
 	}
 }
 
+// GetListChange returns a ListChange struct for a given column.
+// Results are undefined if the column in the base table was not a list.
 func (c *ChangeRow) GetListChange(column string) ListChange {
 	v, _ := c.GetValue(column)
 	isDeleted, _ := c.IsDeleted(column)
@@ -214,6 +275,8 @@ func (c *ChangeRow) GetListChange(column string) ListChange {
 	}
 }
 
+// GetSetChange returns a SetChange struct for a given column.
+// Results are undefined if the column in the base table was not a set.
 func (c *ChangeRow) GetSetChange(column string) SetChange {
 	v, _ := c.GetValue(column)
 	isDeleted, _ := c.IsDeleted(column)
@@ -225,6 +288,8 @@ func (c *ChangeRow) GetSetChange(column string) SetChange {
 	}
 }
 
+// GetMapChange returns a MapChange struct for a given column.
+// Results are undefined if the column in the base table was not a map.
 func (c *ChangeRow) GetMapChange(column string) MapChange {
 	v, _ := c.GetValue(column)
 	isDeleted, _ := c.IsDeleted(column)
@@ -236,7 +301,8 @@ func (c *ChangeRow) GetMapChange(column string) MapChange {
 	}
 }
 
-// TODO: Error checking, e.g. check if given column is a UDT
+// GetUDTChange returns a UDTChange struct for a given column.
+// Results are undefined if the column in the base table was not a UDT.
 func (c *ChangeRow) GetUDTChange(column string) UDTChange {
 	v, _ := c.GetValue(column)
 	typedV, _ := v.(map[string]interface{})
@@ -248,7 +314,6 @@ func (c *ChangeRow) GetUDTChange(column string) UDTChange {
 	typedDeletedElements, _ := deletedElements.([]int16)
 	deletedNames := make([]string, 0, len(typedDeletedElements))
 
-	// TODO: Protect from indices being outside range
 	for i, el := range typedDeletedElements {
 		if i < len(udtType.Elements) {
 			deletedNames = append(deletedNames, udtType.Elements[el].Name)
@@ -265,17 +330,17 @@ func (c *ChangeRow) GetUDTChange(column string) UDTChange {
 	return udtC
 }
 
-// GetOperation returns the type of operation this change represents
+// GetOperation returns the type of operation this change represents.
 func (c *ChangeRow) GetOperation() OperationType {
 	return OperationType(c.cdcCols.operation)
 }
 
-// GetTTL returns 0 if TTL was not set for this operation
+// GetTTL returns TTL for the operation, or 0 if no TTL was used.
 func (c *ChangeRow) GetTTL() int64 {
 	return c.cdcCols.ttl
 }
 
-// GetValue returns value that was assigned to this specific column
+// GetValue returns value that was assigned to this specific column.
 func (c *ChangeRow) GetValue(columnName string) (interface{}, bool) {
 	idx, ok := c.fieldNameToIdx[columnName]
 	if !ok {
@@ -317,6 +382,7 @@ func (c *ChangeRow) GetType(columnName string) (gocql.TypeInfo, bool) {
 	return c.colInfos[idx].TypeInfo, true
 }
 
+// String is needed to implement the fmt.Stringer interface.
 func (c *ChangeRow) String() string {
 	var b strings.Builder
 	b.WriteString(OperationType(c.cdcCols.operation).String())
@@ -361,22 +427,50 @@ func (c *ChangeRow) String() string {
 	return b.String()
 }
 
+// CreateChangeConsumerInput represents input to the CreateChangeConsumer function.
 type CreateChangeConsumerInput struct {
+	// Name of the table from which the new ChangeConsumer will receive changes.
 	TableName string
-	StreamID  StreamID
+
+	// ID of the stream from which the new ChangeConsumer will receive changes.
+	StreamID StreamID
 
 	ProgressReporter *ProgressReporter
 }
 
+// ChangeConsumerFactory is used by the library to instantiate ChangeConsumer
+// objects when the new generation starts.
 type ChangeConsumerFactory interface {
+	// Creates a change consumer with given parameters.
+	//
+	// If this method returns an error, the library will stop with an error.
 	CreateChangeConsumer(ctx context.Context, input CreateChangeConsumerInput) (ChangeConsumer, error)
 }
 
+// ChangeConsumer processes changes from a single stream of the CDC log.
 type ChangeConsumer interface {
+	// Processes a change from the CDC log associated with the stream of
+	// the ChangeConsumer. This method is called in a sequential manner for each
+	// row that appears in the stream.
+	//
+	// If this method returns an error, the library will stop with an error.
 	Consume(ctx context.Context, change Change) error
+
+	// Called after all rows from the stream were consumed, and the reader
+	// is about to switch to a new generation, or stop execution altogether.
+	//
+	// If this method returns an error, the library will stop with an error.
 	End() error
 }
 
+// MakeChangeConsumerFactoryFromFunc can be used if your processing is very
+// simple, and don't need to keep any per-stream state or save any progress.
+// The function supplied as an argument will be shared by all consumers created
+// by this factory, and will be called for each change in the CDC log.
+//
+// Please note that the consumers created by this factory do not perform
+// any synchronization on their own when calling supplied function, therefore
+// you need to guarantee that calling `f` is thread safe.
 func MakeChangeConsumerFactoryFromFunc(f ChangeConsumerFunc) ChangeConsumerFactory {
 	return &changeConsumerFuncInstanceFactory{f}
 }
@@ -385,6 +479,7 @@ type changeConsumerFuncInstanceFactory struct {
 	f ChangeConsumerFunc
 }
 
+// CreateChangeConsumer is needed to implement the ChangeConsumerFactory interface.
 func (ccfif *changeConsumerFuncInstanceFactory) CreateChangeConsumer(
 	ctx context.Context,
 	input CreateChangeConsumerInput,
@@ -407,6 +502,9 @@ func (ccfi *changeConsumerFuncInstance) Consume(ctx context.Context, change Chan
 	return ccfi.f(ctx, ccfi.tableName, change)
 }
 
+// ChangeConsumerFunc can be used in conjunction with MakeChangeConsumerFactoryFromFunc
+// if your processing is very simple. For more information, see the description
+// of the MakeChangeConsumerFactoryFromFunc function.
 type ChangeConsumerFunc func(ctx context.Context, tableName string, change Change) error
 
 type changeRowQuerier struct {

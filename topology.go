@@ -1,4 +1,4 @@
-package scylla_cdc
+package scyllacdc
 
 import (
 	"context"
@@ -28,8 +28,10 @@ type generation struct {
 	streams   []StreamID
 }
 
+// StreamID represents an ID of a stream from a CDC log (cdc$time column).
 type StreamID []byte
 
+// String is needed to implement the fmt.Stringer interface.
 func (sid StreamID) String() string {
 	return hex.EncodeToString(sid)
 }

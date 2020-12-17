@@ -1,4 +1,4 @@
-package scylla_cdc
+package scyllacdc
 
 import (
 	"testing"
@@ -13,7 +13,7 @@ func TestTimeUUIDCompare(t *testing.T) {
 		"200977b6-3f3b-11eb-b122-b0f477f765ec",
 		"200977b6-3f3b-11eb-4230-d2afd2dadc1b",
 		"2020daa0-3f3b-11eb-5459-3f3b971d3b10",
- 		"20fa9312-3f3b-11eb-da71-8cc350d31319",
+		"20fa9312-3f3b-11eb-da71-8cc350d31319",
 	}
 
 	for i := 0; i < len(uuids); i++ {

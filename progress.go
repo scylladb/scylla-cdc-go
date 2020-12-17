@@ -1,4 +1,4 @@
-package scylla_cdc
+package scyllacdc
 
 import (
 	"context"
@@ -9,27 +9,62 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+// ProgressManager allows the library to load and save progress for each
+// stream and table separately.
 type ProgressManager interface {
-	// GetCurrentGenerationTime returns the time of the generation that was
-	// saved as being currently processed. If there was no such information
-	// saved, it returns a zero value for Time.
+	// GetCurrentGeneration returns the time of the generation that was
+	// last saved by StartGeneration. The library will call this function
+	// at the beginning in order to determine from which generation it should
+	// start reading first.
+	//
+	// If there is no information available about the time of the generation
+	// from which reading should start, GetCurrentGeneration can return
+	// a zero time value. In that case, reading will start from the point
+	// determined by AdvancedReaderConfig.ChangeAgeLimit.
+	//
+	// If this function returns an error, the library will stop with an error.
 	GetCurrentGeneration(ctx context.Context) (time.Time, error)
 
-	// StartGeneration is called when a generation is discovered and the reader
-	// should start processing the next generation.
+	// StartGeneration is called after all changes have been read from the
+	// previous generation and the library is about to start processing
+	// the next one. The ProgressManager should save this information so that
+	// GetCurrentGeneration will return it after the library is restarted.
+	//
+	// If this function returns an error, the library will stop with an error.
 	StartGeneration(ctx context.Context, gen time.Time) error
 
 	// GetProgress retrieves information about the progress of given stream,
-	// in a given table. It can return zero value for Progress if there was
-	// no information about the stream
+	// in a given table. If there was no progress saved for this stream
+	// during this generation, GetProgress can return a zero time value
+	// and the library will start processing changes from the stream
+	// starting from the beginning of the generation.
+	//
+	// This method needs to be thread-safe, as the library is allowed to
+	// call it concurrently for different combinations of `table` and `streamID`.
+	// The library won't issue concurrent calls to this method with the same
+	// `table` and `streamID` parameters.
+	//
+	// If this function returns an error, the library will stop with an error.
 	GetProgress(ctx context.Context, gen time.Time, table string, streamID StreamID) (Progress, error)
 
 	// SaveProgress stores information about the last cdc log record which was
 	// processed successfully. If the reader is restarted, it should resume
-	// work for this stream from the last saved
+	// work for this stream starting from the row _after_ the last saved
+	// timestamp.
+	//
+	// This method is only called by ChangeConsumers, indirectly through
+	// the ProgressReporter struct. Within a generation, ChangeConsumers
+	// are run concurrently, therefore SaveProgress should be safe to call
+	// concurrently.
+	//
+	// Contrary to other methods, an error returned does not immediately
+	// result in the library stopping with an error. The error is propagated
+	// to the ChangeConsumer, and it can decide what to do with the error next.
 	SaveProgress(ctx context.Context, gen time.Time, table string, streamID StreamID, progress Progress) error
 }
 
+// ProgressReporter is a helper object for the ChangeConsumer. It allows
+// the consumer to save its progress.
 type ProgressReporter struct {
 	progressManager ProgressManager
 	gen             time.Time
@@ -37,37 +72,71 @@ type ProgressReporter struct {
 	streamID        StreamID
 }
 
+// MarkProgress saves progress for the consumer associated with the ProgressReporter.
+//
+// The associated ChangeConsumer is allowed to call it anytime between its
+// creation by ChangeConsumerFactory and the moment it is stopped (the call to
+// (ChangeConsumer).End() finishes).
 func (pr *ProgressReporter) MarkProgress(ctx context.Context, progress Progress) error {
 	return pr.progressManager.SaveProgress(ctx, pr.gen, pr.tableName, pr.streamID, progress)
 }
 
+// Progress represents the point up to which the library has processed changes
+// in a given stream.
 type Progress struct {
+	// LastProcessedRecordTime represents the value of the cdc$time column
+	// of the last processed record in the stream.
 	LastProcessedRecordTime gocql.UUID
 }
 
-// NoProgressManager does not persist the progress at all. It can be used
-// when saving progress is not necessary.
-type NoProgressManager struct{}
+// noProgressManager does not actually save any progress, and always reports
+// zero progress. This implementation can be used when saving progress
+// is not necessary for the application.
+type noProgressManager struct{}
 
-func (*NoProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
+// GetCurrentGeneration is needed to implement the ProgressManager interface.
+func (noProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
 	return time.Time{}, nil
 }
 
-func (*NoProgressManager) StartGeneration(ctx context.Context, gen time.Time) error {
+// StartGeneration is needed to implement the ProgressManager interface.
+func (noProgressManager) StartGeneration(ctx context.Context, gen time.Time) error {
 	return nil
 }
 
-func (*NoProgressManager) GetProgress(ctx context.Context, gen time.Time, table string, streamID StreamID) (Progress, error) {
+// GetProgress is needed to implement the ProgressManager interface.
+func (noProgressManager) GetProgress(ctx context.Context, gen time.Time, table string, streamID StreamID) (Progress, error) {
 	return Progress{}, nil
 }
 
-func (*NoProgressManager) SaveProgress(ctx context.Context, gen time.Time, table string, streamID StreamID, progress Progress) error {
+// SaveProgress is needed to implement the ProgressManager interface.
+func (noProgressManager) SaveProgress(ctx context.Context, gen time.Time, table string, streamID StreamID, progress Progress) error {
 	return nil
 }
 
+// TableBackedProgressManager is a ProgressManager which saves progress in a Scylla table.
+//
+// The schema is as follows:
+//
+//  CREATE TABLE IF NOT EXISTS <table name> (
+//      generation timestamp,
+//      application_name text,
+//      table_name text,
+//      stream_id blob,
+//      last_timestamp timeuuid,
+//      current_generation timestamp,
+//      PRIMARY KEY ((generation, application_name, table_name, stream_id))
+//  )
+//
+// Progress for each stream is stored in a separate row, indexed by generation,
+// application_name, table_name and stream_id.
+//
+// For storing information about current generation, special rows with stream
+// set to empty bytes is used.
 type TableBackedProgressManager struct {
 	session           *gocql.Session
 	progressTableName string
+	applicationName   string
 
 	// TTL to use when writing progress for a stream (a week by default).
 	// TODO: maybe not? maybe we should clean up this data manually?
@@ -77,10 +146,12 @@ type TableBackedProgressManager struct {
 	concurrentQueryLimiter *semaphore.Weighted
 }
 
+// NewTableBackedProgressManager creates a new TableBackedProgressManager.
 func NewTableBackedProgressManager(session *gocql.Session, progressTableName string, applicationName string) (*TableBackedProgressManager, error) {
 	tbpm := &TableBackedProgressManager{
 		session:           session,
 		progressTableName: progressTableName,
+		applicationName:   applicationName,
 
 		ttl: 7 * 24 * 60 * 60, // 1 week
 
@@ -93,26 +164,35 @@ func NewTableBackedProgressManager(session *gocql.Session, progressTableName str
 	return tbpm, nil
 }
 
+// SetTTL sets the TTL used to expire progress. By default, it's 7 days.
 func (tbpm *TableBackedProgressManager) SetTTL(ttl int32) {
 	tbpm.ttl = ttl
+}
+
+// SetMaxConcurrency sets the maximum allowed concurrency for write operations.
+// By default, it's 100.
+// This function must not be called after Reader for this manager is started.
+func (tbpm *TableBackedProgressManager) SetMaxConcurrency(maxConcurrentOps int64) {
+	tbpm.concurrentQueryLimiter = semaphore.NewWeighted(maxConcurrentOps)
 }
 
 func (tbpm *TableBackedProgressManager) ensureTableExists() error {
 	return tbpm.session.Query(
 		fmt.Sprintf(
 			"CREATE TABLE IF NOT EXISTS %s "+
-				"(generation timestamp, table_name text, stream_id blob, last_timestamp timeuuid, current_generation timestamp, "+
-				"PRIMARY KEY ((generation, table_name, stream_id)))",
+				"(generation timestamp, application_name text, table_name text, stream_id blob, last_timestamp timeuuid, current_generation timestamp, "+
+				"PRIMARY KEY ((generation, application_name, table_name, stream_id)))",
 			tbpm.progressTableName,
 		),
 	).Exec()
 }
 
+// GetCurrentGeneration is needed to implement the ProgressManager interface.
 func (tbpm *TableBackedProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
 	var gen time.Time
 	err := tbpm.session.Query(
-		fmt.Sprintf("SELECT current_generation FROM %s WHERE generation = ? AND table_name = ? AND stream_id = ?", tbpm.progressTableName),
-		time.Time{}, "", []byte{},
+		fmt.Sprintf("SELECT current_generation FROM %s WHERE generation = ? AND application_name = ? AND table_name = ? AND stream_id = ?", tbpm.progressTableName),
+		time.Time{}, tbpm.applicationName, "", []byte{},
 	).Scan(&gen)
 
 	if err != nil && err != gocql.ErrNotFound {
@@ -121,26 +201,28 @@ func (tbpm *TableBackedProgressManager) GetCurrentGeneration(ctx context.Context
 	return gen, nil
 }
 
+// StartGeneration is needed to implement the ProgressManager interface.
 func (tbpm *TableBackedProgressManager) StartGeneration(ctx context.Context, gen time.Time) error {
 	// Update the progress in the special partition
 	return tbpm.session.Query(
 		fmt.Sprintf(
-			"INSERT INTO %s (generation, table_name, stream_id, current_generation) "+
-				"VALUES (?, ?, ?, ?)",
+			"INSERT INTO %s (generation, application_name, table_name, stream_id, current_generation) "+
+				"VALUES (?, ?, ?, ?, ?)",
 			tbpm.progressTableName,
 		),
-		time.Time{}, "", []byte{}, gen,
+		time.Time{}, tbpm.applicationName, "", []byte{}, gen,
 	).Exec()
 }
 
+// GetProgress is needed to implement the ProgressManager interface.
 func (tbpm *TableBackedProgressManager) GetProgress(ctx context.Context, gen time.Time, tableName string, streamID StreamID) (Progress, error) {
 	tbpm.concurrentQueryLimiter.Acquire(ctx, 1)
 	defer tbpm.concurrentQueryLimiter.Release(1)
 
 	var timestamp gocql.UUID
 	err := tbpm.session.Query(
-		fmt.Sprintf("SELECT last_timestamp FROM %s WHERE generation = ? AND table_name = ? AND stream_id = ?", tbpm.progressTableName),
-		gen, tableName, streamID,
+		fmt.Sprintf("SELECT last_timestamp FROM %s WHERE generation = ? AND application_name = ? AND table_name = ? AND stream_id = ?", tbpm.progressTableName),
+		gen, tbpm.applicationName, tableName, streamID,
 	).Scan(&timestamp)
 
 	if err != nil && err != gocql.ErrNotFound {
@@ -149,13 +231,14 @@ func (tbpm *TableBackedProgressManager) GetProgress(ctx context.Context, gen tim
 	return Progress{timestamp}, nil
 }
 
+// SaveProgress is needed to implement the ProgressManager interface.
 func (tbpm *TableBackedProgressManager) SaveProgress(ctx context.Context, gen time.Time, tableName string, streamID StreamID, progress Progress) error {
 	tbpm.concurrentQueryLimiter.Acquire(ctx, 1)
 	defer tbpm.concurrentQueryLimiter.Release(1)
 
 	return tbpm.session.Query(
-		fmt.Sprintf("INSERT INTO %s (generation, table_name, stream_id, last_timestamp) VALUES (?, ?, ?, ?) USING TTL ?", tbpm.progressTableName),
-		gen, tableName, streamID, progress.LastProcessedRecordTime, tbpm.ttl,
+		fmt.Sprintf("INSERT INTO %s (generation, application_name, table_name, stream_id, last_timestamp) VALUES (?, ?, ?, ?, ?) USING TTL ?", tbpm.progressTableName),
+		gen, tbpm.applicationName, tableName, streamID, progress.LastProcessedRecordTime, tbpm.ttl,
 	).Exec()
 }
 

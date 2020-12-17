@@ -1,4 +1,4 @@
-package scylla_cdc
+package scyllacdc
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// ReaderConfig defines parameters used for creation of the CDC Reader object.
 type ReaderConfig struct {
 	// An active gocql session to the cluster.
 	Session *gocql.Session
@@ -21,7 +22,8 @@ type ReaderConfig struct {
 	// Can be prefixed with keyspace name.
 	TableNames []string
 
-	// Consistency to use when querying CDC log
+	// Consistency to use when querying CDC log.
+	// If not specified, QUORUM consistency will be used.
 	Consistency gocql.Consistency
 
 	// Creates ChangeProcessors, which process information fetched from the CDC log.
@@ -35,63 +37,132 @@ type ReaderConfig struct {
 	// A logger. If set, it will receive log messages useful for debugging of the library.
 	Logger Logger
 
-	// Advanced parameters
+	// Advanced parameters.
 	Advanced AdvancedReaderConfig
 }
 
-// TODO: Document
+func (rc *ReaderConfig) validate() error {
+	if len(rc.TableNames) == 0 {
+		return errors.New("no table names specified to read from")
+	}
+	if rc.ChangeConsumerFactory == nil {
+		return errors.New("no change consumer factory specified")
+	}
+
+	return nil
+}
+
+func (rc *ReaderConfig) setDefaults() {
+	if rc.Consistency == 0 {
+		// Consistency 0 is ANY. It doesn't make sense
+		// to use it for reading, so default to QUORUM instead
+		rc.Consistency = gocql.Quorum
+	}
+	if rc.ProgressManager == nil {
+		rc.ProgressManager = noProgressManager{}
+	}
+	if rc.Logger == nil {
+		rc.Logger = noLogger{}
+	}
+	rc.Advanced.setDefaults()
+}
+
+// AdvancedReaderConfig contains advanced parameters that control behavior
+// of the CDC Reader. It is not recommended to change them unless really
+// necessary. They have carefully selected default values that should work for
+// most cases. Changing these parameters need to be done carefully.
 type AdvancedReaderConfig struct {
+	// ConfidenceWindowSize defines a minimal age a change must have in order
+	// to be read.
+	//
+	// Due to the eventually consistent nature of Scylla, newer writes may
+	// appear in CDC log earlier than some older writes. This can cause the
+	// Reader to skip the older write, therefore the need for this parameter.
+	//
+	// If the parameter is left as 0, the library will automatically choose
+	// a default confidence window size.
 	ConfidenceWindowSize time.Duration
 
+	// The library uses select statements to fetch changes from CDC Log tables.
+	// Each select fetches changes from a single table and fetches only changes
+	// from a limited set of CDC streams. If such select returns one or more
+	// changes then next select to this table and set of CDC streams will be
+	// issued after a delay. This parameter specifies the length of the delay.
+	//
+	// If the parameter is left as 0, the library will automatically adjust
+	// the length of the delay.
 	PostNonEmptyQueryDelay time.Duration
-	PostEmptyQueryDelay    time.Duration
-	PostFailedQueryDelay   time.Duration
 
+	// The library uses select statements to fetch changes from CDC Log tables.
+	// Each select fetches changes from a single table and fetches only changes
+	// from a limited set of CDC streams. If such select returns no changes then
+	// next select to this table and set of CDC streams will be issued after
+	// a delay. This parameter specifies the length of the delay.
+	//
+	// If the parameter is left as 0, the library will automatically adjust
+	// the length of the delay.
+	PostEmptyQueryDelay time.Duration
+
+	// If the library tries to read from the CDC log and the read operation
+	// fails, it will wait some time before attempting to read again. This
+	// parameter specifies the length of the delay.
+	//
+	// If the parameter is left as 0, the library will automatically adjust
+	// the length of the delay.
+	PostFailedQueryDelay time.Duration
+
+	// Changes are queried using select statements with restriction on the time
+	// those changes appeared. The restriction is bounding the time from both
+	// lower and upper bounds. This parameter defines the width of the time
+	// window used for the restriction.
+	//
+	// If the parameter is left as 0, the library will automatically adjust
+	// the size of the restriction window.
 	QueryTimeWindowSize time.Duration
-	ChangeAgeLimit      time.Duration
+
+	// When the library starts for the first time it has to start consuming
+	// changes from some point in time. This parameter defines how far in the
+	// past it needs to look. If the value of the parameter is set to an hour,
+	// then the library will only read historical changes that are no older than
+	// an hour.
+	//
+	// Note of caution: data in CDC Log table is automatically deleted so
+	// setting this parameter to something bigger than TTL used on CDC Log won’t
+	// cause changes older than this TTL to appear.
+	//
+	// If the parameter is left as 0, the library will automatically adjust
+	// the size of the restriction window.
+	ChangeAgeLimit time.Duration
 }
 
-// Creates a ReaderConfig struct with safe defaults.
-func NewReaderConfig(
-	session *gocql.Session,
-	consumerFactory ChangeConsumerFactory,
-	progressManager ProgressManager,
-	tableNames ...string,
-) *ReaderConfig {
-	return &ReaderConfig{
-		Session:               session,
-		TableNames:            tableNames,
-		Consistency:           gocql.Quorum,
-		ChangeConsumerFactory: consumerFactory,
-		ProgressManager:       progressManager,
-
-		Advanced: AdvancedReaderConfig{
-			ConfidenceWindowSize: 30 * time.Second,
-
-			PostNonEmptyQueryDelay: 10 * time.Second,
-			PostEmptyQueryDelay:    30 * time.Second,
-			PostFailedQueryDelay:   1 * time.Second,
-
-			QueryTimeWindowSize: 30 * time.Second,
-			ChangeAgeLimit:      1 * time.Minute, // TODO: Does that make sense?
-		},
+func (arc *AdvancedReaderConfig) setDefaults() {
+	setIfZero := func(p *time.Duration, v time.Duration) {
+		if *p == 0 {
+			*p = v
+		}
 	}
+	setIfZero(&arc.ConfidenceWindowSize, 30*time.Second)
+
+	setIfZero(&arc.PostNonEmptyQueryDelay, 10*time.Second)
+	setIfZero(&arc.PostEmptyQueryDelay, 30*time.Second)
+	setIfZero(&arc.PostFailedQueryDelay, 1*time.Second)
+
+	setIfZero(&arc.QueryTimeWindowSize, 30*time.Second)
+	setIfZero(&arc.ChangeAgeLimit, 1*time.Minute)
 }
 
+// Copy makes a shallow copy of the ReaderConfig.
 func (rc *ReaderConfig) Copy() *ReaderConfig {
 	newRC := &ReaderConfig{}
 	*newRC = *rc
 	return newRC
 }
 
-var (
-	ErrNotALogTable = errors.New("the table is not a CDC log table")
-)
-
 const (
 	cdcTableSuffix string = "_scylla_cdc_log"
 )
 
+// Reader reads changes from CDC logs of the specified tables.
 type Reader struct {
 	config     *ReaderConfig
 	genFetcher *generationFetcher
@@ -100,14 +171,13 @@ type Reader struct {
 	stopTime   atomic.Value
 }
 
-// Creates a new CDC reader.
+// NewReader creates a new CDC reader using the specified configuration.
 func NewReader(ctx context.Context, config *ReaderConfig) (*Reader, error) {
-	if config.Logger == nil {
-		config.Logger = &noLogger{}
-	}
+	config = config.Copy()
 
-	if config.ProgressManager == nil {
-		return nil, errors.New("no progress manager was specified")
+	config.setDefaults()
+	if err := config.validate(); err != nil {
+		return nil, err
 	}
 
 	readFrom, err := config.ProgressManager.GetCurrentGeneration(ctx)
@@ -131,7 +201,7 @@ func NewReader(ctx context.Context, config *ReaderConfig) (*Reader, error) {
 	}
 
 	reader := &Reader{
-		config:     config.Copy(),
+		config:     config,
 		genFetcher: genFetcher,
 		readFrom:   readFrom,
 		stoppedCh:  make(chan struct{}),

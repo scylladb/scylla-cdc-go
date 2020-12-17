@@ -1,4 +1,4 @@
-package scylla_cdc
+package scyllacdc
 
 import (
 	"context"
@@ -58,10 +58,10 @@ func (sbr *streamBatchReader) run(ctx context.Context) (err error) {
 	defer func(err *error) {
 		for s, c := range sbr.consumers {
 			err2 := c.End()
+			if err2 != nil {
+				sbr.config.Logger.Printf("error while ending consumer for stream %s (will quit): %s", StreamID(s), err2)
+			}
 			if *err == nil {
-				if err2 != nil {
-					sbr.config.Logger.Printf("error while ending consumer for stream %s (will quit): %s", StreamID(s), err2)
-				}
 				*err = err2
 			}
 		}
@@ -88,10 +88,6 @@ func (sbr *streamBatchReader) run(ctx context.Context) (err error) {
 	}
 
 	crq := newChangeRowQuerier(sbr.config.Session, sbr.streams, sbr.keyspaceName, sbr.tableName, sbr.config.Consistency)
-
-	// It's possible that, when starting, we are in a long period in which nothing happens.
-	// Try to fast forward in the beginning
-	sbr.fastForward(crq)
 
 	wnd := sbr.getPollWindow()
 
@@ -120,19 +116,6 @@ outer:
 				// If there were no errors, then we can safely advance
 				// all streams to the window end
 				sbr.advanceAllStreamsTo(wnd.end)
-
-				if !hadRows && !wnd.touchesConfidenceWindow {
-					// We had an empty poll, and it didn't touch the confidence window.
-					// This means that we are probably still replaying old changes,
-					// and there is a possibility that we encountered a long period
-					// in which there were no changes  (for example, ChangeAgeLimit
-					// was set to 1 day, but we started writing to CDC log one hour ago).
-					//
-					// Look up the next row for each stream in range (now, confidence
-					// window end]. In next poll, we will start reading from the point
-					// that those rows appear
-					sbr.fastForward(crq)
-				}
 			}
 		}
 
@@ -168,6 +151,8 @@ outer:
 		}
 	}
 
+	sbr.config.Logger.Printf("ending stream batch %v", sbr.streams)
+
 	return nil
 }
 
@@ -178,6 +163,7 @@ func (sbr *streamBatchReader) loadProgressForStreams(ctx context.Context) error 
 			return err
 		}
 		if compareTimeuuid(sbr.lastTimestamp, progress.LastProcessedRecordTime) < 0 {
+			sbr.config.Logger.Printf("loaded progress for stream %s: %s (%s)\n", stream, progress.LastProcessedRecordTime, progress.LastProcessedRecordTime.Time())
 			sbr.perStreamProgress[string(stream)] = progress.LastProcessedRecordTime
 		} else {
 			sbr.perStreamProgress[string(stream)] = sbr.lastTimestamp
@@ -189,32 +175,8 @@ func (sbr *streamBatchReader) loadProgressForStreams(ctx context.Context) error 
 
 func (sbr *streamBatchReader) advanceAllStreamsTo(point gocql.UUID) {
 	for id := range sbr.perStreamProgress {
-		sbr.perStreamProgress[id] = point
-	}
-}
-
-func (sbr *streamBatchReader) fastForward(crq *changeRowQuerier) {
-	begin := sbr.getPollWindowStart()
-	end := gocql.MinTimeUUID(sbr.getConfidenceLimitPoint())
-
-	nextRowTimePerStream, err := crq.findFirstRowsInRange(begin, end)
-	if err != nil {
-		sbr.config.Logger.Printf("error while trying to skip forward (will ignore): %s", err)
-		return
-	}
-
-	for _, s := range sbr.streams {
-		if nextRowTime, ok := nextRowTimePerStream[string(s)]; ok {
-			// We don't want to skip a row with this timestamp,
-			// therefore subtract a millisecond
-			progress := gocql.MaxTimeUUID(nextRowTime.Time().Add(-time.Millisecond))
-			if compareTimeuuid(sbr.perStreamProgress[string(s)], progress) < 0 {
-				sbr.perStreamProgress[string(s)] = progress
-			}
-		} else {
-			// No row found for this stream - we can skip
-			// right to confidence window end
-			sbr.perStreamProgress[string(s)] = end
+		if compareTimeuuid(sbr.perStreamProgress[id], point) < 0 {
+			sbr.perStreamProgress[id] = point
 		}
 	}
 }
@@ -275,9 +237,9 @@ func (sbr *streamBatchReader) processRows(ctx context.Context, iter *changeRowIt
 			break
 		}
 		if c.GetOperation() == PreImage {
-			change.Preimage = append(change.Preimage, c)
+			change.PreImage = append(change.PreImage, c)
 		} else if c.GetOperation() == PostImage {
-			change.Postimage = append(change.Postimage, c)
+			change.PostImage = append(change.PostImage, c)
 		} else {
 			change.Delta = append(change.Delta, c)
 		}
@@ -288,10 +250,10 @@ func (sbr *streamBatchReader) processRows(ctx context.Context, iter *changeRowIt
 			// Since we are reading in batches and we started from the lowest progress mark
 			// of all streams in the batch, we might have to manually filter out changes
 			// from streams that had a save point later than the earliest progress mark
-			if compareTimeuuid(sbr.perStreamProgress[string(change.StreamID)], changeBatchCols.time) < 0 {
+			if compareTimeuuid(sbr.perStreamProgress[string(changeBatchCols.streamID)], changeBatchCols.time) < 0 {
 				change.StreamID = changeBatchCols.streamID
 				change.Time = changeBatchCols.time
-				consumer := sbr.consumers[string(change.StreamID)]
+				consumer := sbr.consumers[string(changeBatchCols.streamID)]
 				if err := consumer.Consume(ctx, change); err != nil {
 					sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
 					return 0, err
@@ -299,12 +261,12 @@ func (sbr *streamBatchReader) processRows(ctx context.Context, iter *changeRowIt
 
 				// It's important to save progress here. If fetching of a page fails,
 				// we will have to poll again, and filter out some rows.
-				sbr.perStreamProgress[string(change.StreamID)] = changeBatchCols.time
+				sbr.perStreamProgress[string(changeBatchCols.streamID)] = changeBatchCols.time
 			}
 
-			change.Preimage = nil
+			change.PreImage = nil
 			change.Delta = nil
-			change.Postimage = nil
+			change.PostImage = nil
 		}
 	}
 
