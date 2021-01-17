@@ -65,14 +65,13 @@ Next, you need to create and run a scyllacdc.Reader object:
 		}
 		defer session.Close()
 
-		cfg := scyllacdc.NewReaderConfig(
-			session,
-			scyllacdc.MakeChangeConsumerFactoryFromFunc(printerConsumer),
+		cfg := &scyllacdc.ReaderConfig{
+			Session:               session,
+			TableNames:            []string{"my_keyspace.my_table"},
+			ChangeConsumerFactory: scyllacdc.MakeChangeConsumerFactoryFromFunc(printerConsumer),
 			// The above can be changed to:
-			//   &myFactory{},
-			&scyllacdc.NoProgressManager{},
-			"my_keyspace.my_table",
-		)
+			// ChangeConsumerFactory: &myFactory{},
+		}
 
 		reader, err := scyllacdc.NewReader(context.Background(), cfg)
 		if err != nil {
