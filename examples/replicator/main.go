@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
-	scyllacdc "github.com/piodul/scylla-cdc-go"
+	scyllacdc "github.com/scylladb/scylla-cdc-go"
 )
 
 // TODO: Escape field names?

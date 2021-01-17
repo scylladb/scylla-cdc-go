@@ -9,7 +9,7 @@ import (
 	"os/signal"
 
 	"github.com/gocql/gocql"
-	scyllacdc "github.com/piodul/scylla-cdc-go"
+	scyllacdc "github.com/scylladb/scylla-cdc-go"
 )
 
 func main() {

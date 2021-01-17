@@ -556,7 +556,15 @@ func (crq *changeRowQuerier) queryRange(start, end gocql.UUID) (*changeRowIterat
 	var colNames []string
 	var tupleNames []string
 	for _, col := range tmeta.Columns {
-		if strings.HasPrefix(col.Type, "frozen<tuple<") || strings.HasPrefix(col.Type, "tuple<") {
+		var ct interface{} = col.Type
+		var ctStr string
+		switch ct := ct.(type) {
+		case string:
+			ctStr = ct
+		case fmt.Stringer:
+			ctStr = ct.String()
+		}
+		if strings.HasPrefix(ctStr, "frozen<tuple<") || strings.HasPrefix(ctStr, "tuple<") || strings.HasPrefix(ctStr, "tuple(") {
 			tupleNames = append(tupleNames, col.Name)
 			colNames = append(colNames, fmt.Sprintf("writetime(%s)", escapeColumnNameIfNeeded(col.Name)))
 		}
