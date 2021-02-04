@@ -53,14 +53,14 @@ func consumeChange(ctx context.Context, tableName string, c scyllacdc.Change) er
 
 		if v.IsDeleted {
 			fmt.Printf("  Column v was set to null/deleted\n")
-			return nil
+		} else {
+			vInt := v.Value.(*int)
+			if vInt != nil {
+				fmt.Printf("  Column v was set to %d\n", *vInt)
+			} else {
+				fmt.Print("  Column v was not changed\n")
+			}
 		}
-		vInt := v.Value.(*int)
-		if vInt != nil {
-			fmt.Printf("  Column v was set to %d\n", *vInt)
-			return nil
-		}
-		fmt.Print("  Column v was not changed\n")
 	}
 
 	return nil

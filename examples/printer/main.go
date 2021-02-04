@@ -26,7 +26,7 @@ func main() {
 
 	// Configure a session first
 	cluster := gocql.NewCluster(source)
-	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.DCAwareRoundRobinPolicy("local-dc"))
 	session, err := cluster.CreateSession()
 	if err != nil {
 		log.Fatal(err)
@@ -35,7 +35,7 @@ func main() {
 
 	cfg := &scyllacdc.ReaderConfig{
 		Session:               session,
-		ChangeConsumerFactory: scyllacdc.MakeChangeConsumerFactoryFromFunc(printerConsumer),
+		ChangeConsumerFactory: changeConsumerFactory,
 		TableNames:            []string{keyspace + "." + table},
 		Logger:                log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
 	}
@@ -86,3 +86,5 @@ func printerConsumer(ctx context.Context, tableName string, c scyllacdc.Change) 
 
 	return nil
 }
+
+var changeConsumerFactory = scyllacdc.MakeChangeConsumerFactoryFromFunc(printerConsumer)
