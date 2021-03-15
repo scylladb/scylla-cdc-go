@@ -291,8 +291,3 @@ func (gs *generationSourcePre4_4) getGenerationTimes(consistency gocql.Consisten
 func (gs *generationSourcePre4_4) maybeUpgrade() (generationSource, error) {
 	return gs, nil
 }
-
-// Finds a name of a supported table for fetching cdc streams
-func getGenerationsTableName(session *gocql.Session) (string, error) {
-	return "system_distributed.cdc_streams_descriptions", nil
-}
