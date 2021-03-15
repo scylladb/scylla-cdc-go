@@ -15,7 +15,7 @@ var (
 )
 
 const (
-	generationsTableName = "system_distributed.cdc_streams_descriptions"
+	generationsTableNamePre4_4 = "system_distributed.cdc_streams_descriptions"
 
 	// TODO: Switch to a model which reacts to cluster state changes
 	// and forces a refresh when all worker goroutines did not report any
@@ -60,6 +60,8 @@ type generationFetcher struct {
 	generationCh chan *generation
 	refreshCh    chan struct{}
 	stopCh       chan struct{}
+
+	source generationSource
 }
 
 func newGenerationFetcher(
@@ -75,6 +77,11 @@ func newGenerationFetcher(
 		generationCh: make(chan *generation, 1),
 		stopCh:       make(chan struct{}),
 		refreshCh:    make(chan struct{}, 1),
+
+		source: &generationSourcePre4_4{
+			session: session,
+			logger:  logger,
+		},
 	}
 	return gf, nil
 }
@@ -130,8 +137,16 @@ func (gf *generationFetcher) tryFetchGenerations() {
 		consistency = gocql.All
 	}
 
+	// Try switching to a new format before fetching any generations
+	newSource, err := gf.source.maybeUpgrade()
+	if err != nil {
+		gf.logger.Printf("an error occurred while trying to switch to new generations format: %s", err)
+	} else {
+		gf.source = newSource
+	}
+
 	// Fetch some generation times
-	times, err := gf.getGenerationTimes(consistency)
+	times, err := gf.source.getGenerationTimes(consistency)
 	if err != nil {
 		gf.logger.Printf("an error occured while fetching generation times: %s", err)
 		return
@@ -139,7 +154,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 	sort.Sort(timeList(times))
 
 	fetchAndPush := func(t time.Time) (shouldBreak bool) {
-		streams, err := gf.getGeneration(t, consistency)
+		streams, err := gf.source.getGeneration(t, consistency)
 		if err != nil {
 			gf.logger.Printf("an error occured while fetching generation streams for %s: %s", t, err)
 			return true
@@ -222,9 +237,32 @@ func (gf *generationFetcher) pushGeneration(gen *generation) (shouldStop bool) {
 	}
 }
 
-func (gf *generationFetcher) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+// Unfortunately, gocql does not expose information about the cluster,
+// therefore we need to poll system.peers manually
+func (gf *generationFetcher) getClusterSize() (int, error) {
+	var size int
+	err := gf.session.Query("SELECT COUNT(*) FROM system.peers").Scan(&size)
+	if err != nil {
+		return 0, err
+	}
+	return size + 1, nil
+}
+
+type generationSource interface {
+	getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error)
+	getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error)
+
+	maybeUpgrade() (generationSource, error)
+}
+
+type generationSourcePre4_4 struct {
+	session *gocql.Session
+	logger  Logger
+}
+
+func (gs *generationSourcePre4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
 	var streams []StreamID
-	err := gf.session.Query("SELECT streams FROM "+generationsTableName+" WHERE time = ?", genTime).
+	err := gs.session.Query("SELECT streams FROM "+generationsTableNamePre4_4+" WHERE time = ?", genTime).
 		Consistency(consistency).
 		Scan(&streams)
 	if err != nil {
@@ -233,8 +271,8 @@ func (gf *generationFetcher) getGeneration(genTime time.Time, consistency gocql.
 	return streams, err
 }
 
-func (gf *generationFetcher) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
-	iter := gf.session.Query("SELECT time FROM " + generationsTableName).
+func (gs *generationSourcePre4_4) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
+	iter := gs.session.Query("SELECT time FROM " + generationsTableNamePre4_4).
 		Consistency(consistency).
 		Iter()
 	var (
@@ -250,15 +288,8 @@ func (gf *generationFetcher) getGenerationTimes(consistency gocql.Consistency) (
 	return times, nil
 }
 
-// Unfortunately, gocql does not expose information about the cluster,
-// therefore we need to poll system.peers manually
-func (gf *generationFetcher) getClusterSize() (int, error) {
-	var size int
-	err := gf.session.Query("SELECT COUNT(*) FROM system.peers").Scan(&size)
-	if err != nil {
-		return 0, err
-	}
-	return size + 1, nil
+func (gs *generationSourcePre4_4) maybeUpgrade() (generationSource, error) {
+	return gs, nil
 }
 
 // Finds a name of a supported table for fetching cdc streams
