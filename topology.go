@@ -15,7 +15,11 @@ var (
 )
 
 const (
-	generationsTableNamePre4_4 = "system_distributed.cdc_streams_descriptions"
+	systemDistributedKeyspace  = "system_distributed"
+	generationsTableNamePre4_4 = "cdc_streams_descriptions"
+
+	timestampsTableSince4_4 = "cdc_generation_timestamps"
+	streamsTableSince4_4    = "cdc_streams_descriptions_v2"
 
 	// TODO: Switch to a model which reacts to cluster state changes
 	// and forces a refresh when all worker goroutines did not report any
@@ -138,7 +142,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 	}
 
 	// Try switching to a new format before fetching any generations
-	newSource, err := gf.source.maybeUpgrade()
+	newSource, err := gf.source.maybeUpgrade(consistency)
 	if err != nil {
 		gf.logger.Printf("an error occurred while trying to switch to new generations format: %s", err)
 	} else {
@@ -252,7 +256,7 @@ type generationSource interface {
 	getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error)
 	getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error)
 
-	maybeUpgrade() (generationSource, error)
+	maybeUpgrade(consistency gocql.Consistency) (generationSource, error)
 }
 
 type generationSourcePre4_4 struct {
@@ -262,7 +266,7 @@ type generationSourcePre4_4 struct {
 
 func (gs *generationSourcePre4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
 	var streams []StreamID
-	err := gs.session.Query("SELECT streams FROM "+generationsTableNamePre4_4+" WHERE time = ?", genTime).
+	err := gs.session.Query("SELECT streams FROM "+systemDistributedKeyspace+"."+generationsTableNamePre4_4+" WHERE time = ?", genTime).
 		Consistency(consistency).
 		Scan(&streams)
 	if err != nil {
@@ -272,7 +276,7 @@ func (gs *generationSourcePre4_4) getGeneration(genTime time.Time, consistency g
 }
 
 func (gs *generationSourcePre4_4) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
-	iter := gs.session.Query("SELECT time FROM " + generationsTableNamePre4_4).
+	iter := gs.session.Query("SELECT time FROM " + systemDistributedKeyspace + "." + generationsTableNamePre4_4).
 		Consistency(consistency).
 		Iter()
 	var (
@@ -288,6 +292,87 @@ func (gs *generationSourcePre4_4) getGenerationTimes(consistency gocql.Consisten
 	return times, nil
 }
 
-func (gs *generationSourcePre4_4) maybeUpgrade() (generationSource, error) {
+// Follows the migration procedure from Scylla's documentation
+// https://docs.scylladb.com/using-scylla/cdc/cdc-querying-streams/
+func (gs *generationSourcePre4_4) maybeUpgrade(consistency gocql.Consistency) (generationSource, error) {
+	meta, err := gs.session.KeyspaceMetadata(systemDistributedKeyspace)
+	if err != nil {
+		return gs, err
+	}
+
+	// Check if table is present
+	_, ok := meta.Tables[streamsTableSince4_4]
+	if !ok {
+		// Don't upgrade, the new table is not there yet
+		return gs, nil
+	}
+
+	// Was the migration completed?
+	data := make(map[string]interface{})
+	err = gs.session.Query("SELECT streams_timestamp FROM system.cdc_local WHERE key = 'rewritten'").
+		Consistency(consistency).
+		MapScan(data)
+
+	if err == gocql.ErrNotFound {
+		// The "rewritten" row is not present yet, this means that the generations
+		// weren't rewritten yet
+		// Try again later
+		return gs, nil
+	}
+
+	if err != nil {
+		// Some other error
+		return gs, err
+	}
+
+	newGs := &generationSourceSince4_4{
+		session: gs.session,
+		logger:  gs.logger,
+	}
+
+	return newGs.maybeUpgrade(consistency)
+}
+
+type generationSourceSince4_4 struct {
+	session *gocql.Session
+	logger  Logger
+}
+
+func (gs *generationSourceSince4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+	var streams []StreamID
+	iter := gs.session.Query("SELECT streams FROM "+systemDistributedKeyspace+"."+streamsTableSince4_4+" WHERE time = ?", genTime).
+		Consistency(consistency).
+		Iter()
+
+	var vnodeStreams []StreamID
+	for iter.Scan(&vnodeStreams) {
+		streams = append(streams, vnodeStreams...)
+	}
+
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return streams, nil
+}
+
+func (gs *generationSourceSince4_4) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
+	iter := gs.session.Query("SELECT time FROM " + systemDistributedKeyspace + "." + timestampsTableSince4_4).
+		Consistency(consistency).
+		Iter()
+	var (
+		times    []time.Time
+		currTime time.Time
+	)
+	for iter.Scan(&currTime) {
+		times = append(times, currTime)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return times, nil
+}
+
+func (gs *generationSourceSince4_4) maybeUpgrade(consistency gocql.Consistency) (generationSource, error) {
+	// No newer format is known
 	return gs, nil
 }
