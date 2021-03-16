@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -16,6 +17,9 @@ var (
 
 const (
 	generationsTableNamePre4_4 = "system_distributed.cdc_streams_descriptions"
+
+	timestampsTableSince4_4 = "system_distributed.cdc_generation_timestamps"
+	streamsTableSince4_4    = "system_distributed.cdc_streams_descriptions_v2"
 
 	// TODO: Switch to a model which reacts to cluster state changes
 	// and forces a refresh when all worker goroutines did not report any
@@ -288,6 +292,107 @@ func (gs *generationSourcePre4_4) getGenerationTimes(consistency gocql.Consisten
 	return times, nil
 }
 
+// Follows the migration procedure from Scylla's documentation
+// https://docs.scylladb.com/using-scylla/cdc/cdc-querying-streams/
 func (gs *generationSourcePre4_4) maybeUpgrade() (generationSource, error) {
+	// Check if table is present
+	hasNewStreamsTable, err := isTableInSchema(gs.session, streamsTableSince4_4)
+	if err != nil {
+		return gs, err
+	}
+	if !hasNewStreamsTable {
+		// Don't upgrade, the new table is not there yet
+		return gs, nil
+	}
+
+	// Was the migration completed?
+	data := make(map[string]interface{})
+	err = gs.session.Query("SELECT streams_timestamp FROM system.cdc_local WHERE key = 'rewritten'").
+		MapScan(data)
+
+	if err == gocql.ErrNotFound {
+		// The "rewritten" row is not present yet, this means that the generations
+		// weren't rewritten yet
+		// Try again later
+		return gs, nil
+	}
+
+	if err != nil {
+		// Some other error
+		return gs, err
+	}
+
+	newGs := &generationSourceSince4_4{
+		session: gs.session,
+		logger:  gs.logger,
+	}
+
+	return newGs.maybeUpgrade()
+}
+
+type generationSourceSince4_4 struct {
+	session *gocql.Session
+	logger  Logger
+}
+
+func (gs *generationSourceSince4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+	var streams []StreamID
+	iter := gs.session.Query("SELECT streams FROM "+streamsTableSince4_4+" WHERE time = ?", genTime).
+		Consistency(consistency).
+		Iter()
+
+	var vnodeStreams []StreamID
+	for iter.Scan(&vnodeStreams) {
+		streams = append(streams, vnodeStreams...)
+	}
+
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return streams, nil
+}
+
+func (gs *generationSourceSince4_4) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
+	iter := gs.session.Query("SELECT time FROM " + timestampsTableSince4_4 + " WHERE key = 'timestamps'").
+		Consistency(consistency).
+		Iter()
+	var (
+		times    []time.Time
+		currTime time.Time
+	)
+	for iter.Scan(&currTime) {
+		times = append(times, currTime)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	return times, nil
+}
+
+func (gs *generationSourceSince4_4) maybeUpgrade() (generationSource, error) {
+	// No newer format is known
 	return gs, nil
+}
+
+// Takes a fully-qualified name of a table and returns if a table of given name
+// is in the schema.
+// Panics if the table name is not qualified, i.e. it does not contain a dot.
+func isTableInSchema(session *gocql.Session, tableName string) (bool, error) {
+	decomposed := strings.SplitN(tableName, ".", 2)
+	if len(decomposed) < 2 {
+		panic("unqualified table name passed to inTableInSchema")
+	}
+
+	keyspace := decomposed[0]
+	table := decomposed[1]
+
+	meta, err := session.KeyspaceMetadata(keyspace)
+	if err == gocql.ErrKeyspaceDoesNotExist {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+
+	_, ok := meta.Tables[table]
+	return ok, nil
 }
