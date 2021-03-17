@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -11,7 +12,8 @@ import (
 )
 
 var (
-	ErrNoGenerationsPresent = errors.New("there are no generations present")
+	ErrNoGenerationsPresent               = errors.New("there are no generations present")
+	ErrNoSupportedGenerationTablesPresent = errors.New("no supported generation tables are present")
 )
 
 const (
@@ -73,6 +75,11 @@ func newGenerationFetcher(
 	startFrom time.Time,
 	logger Logger,
 ) (*generationFetcher, error) {
+	source, err := chooseGenerationSource(session, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect version of the generation tables used by the cluster: %v", err)
+	}
+
 	gf := &generationFetcher{
 		session:  session,
 		lastTime: startFrom,
@@ -82,12 +89,45 @@ func newGenerationFetcher(
 		stopCh:       make(chan struct{}),
 		refreshCh:    make(chan struct{}, 1),
 
-		source: &generationSourcePre4_4{
-			session: session,
-			logger:  logger,
-		},
+		source: source,
 	}
 	return gf, nil
+}
+
+func chooseGenerationSource(session *gocql.Session, logger Logger) (generationSource, error) {
+	meta, err := session.KeyspaceMetadata(systemDistributedKeyspace)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if pre-4.4 table is there
+	_, hasPre4_4 := meta.Tables[generationsTableNamePre4_4]
+	_, hasPost4_4 := meta.Tables[streamsTableSince4_4]
+
+	if !hasPost4_4 && !hasPre4_4 {
+		// There are no tables we know how to use - return an error
+		return nil, ErrNoSupportedGenerationTablesPresent
+	}
+
+	if hasPost4_4 && !hasPre4_4 {
+		// There is only 4.4+ table, we can immediately start
+		// using the new table
+		return &generationSourceSince4_4{
+			session: session,
+			logger:  logger,
+		}, nil
+	}
+
+	// If we are here, then the pre-4.4 table is there for sure
+	// If there is no 4.4+ table - we will start using it right away
+	// If there is a 4.4+ table - the maybeUpgrade function
+	// will take care of switching to the new table, but only after
+	// generation rewriting completes
+
+	return &generationSourcePre4_4{
+		session: session,
+		logger:  logger,
+	}, nil
 }
 
 func (gf *generationFetcher) Run(ctx context.Context) error {
