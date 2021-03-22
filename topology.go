@@ -175,10 +175,8 @@ func (gf *generationFetcher) tryFetchGenerations() {
 	}
 
 	consistency := gocql.One
-	if size == 2 {
+	if size >= 2 {
 		consistency = gocql.Quorum
-	} else if size >= 3 {
-		consistency = gocql.All
 	}
 
 	// Try switching to a new format before fetching any generations
