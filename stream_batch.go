@@ -96,6 +96,8 @@ outer:
 		var err error
 		var hadRows bool
 
+		windowProcessingStartTime := time.Now()
+
 		if compareTimeuuid(wnd.begin, wnd.end) < 0 {
 			var iter *changeRowIterator
 			iter, err = crq.queryRange(wnd.begin, wnd.end)
@@ -130,7 +132,10 @@ outer:
 			delay = sbr.config.Advanced.PostEmptyQueryDelay
 		}
 
-		delayUntil := time.Now().Add(delay)
+		delayUntil := windowProcessingStartTime.Add(delay)
+		if time.Until(delayUntil) < time.Duration(0) {
+			sbr.config.Logger.Printf("the stream can't keep up! the next poll was supposed to happen %v ago", -time.Until(delayUntil))
+		}
 
 		if sbr.reachedEndOfTheGeneration(wnd.begin) {
 			break outer
@@ -141,7 +146,7 @@ outer:
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(delayUntil.Sub(time.Now())):
+			case <-time.After(time.Until(delayUntil)):
 				break delay
 			case <-sbr.interruptCh:
 				if sbr.reachedEndOfTheGeneration(wnd.begin) {
