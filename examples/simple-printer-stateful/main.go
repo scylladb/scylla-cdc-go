@@ -24,13 +24,23 @@ func main() {
 	}
 	defer session.Close()
 
+	var progressManager scyllacdc.ProgressManager
+	progressManager, err = scyllacdc.NewTableBackedProgressManager(session, "ks.cdc_progress", "cdc-replicator")
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+
 	logger := log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 
 	cfg := &scyllacdc.ReaderConfig{
-		Session:               session,
-		TableNames:            []string{"ks.tbl"},
-		ChangeConsumerFactory: changeConsumerFactory,
-		Logger:                logger,
+		Session:    session,
+		TableNames: []string{"ks.tbl"},
+		ChangeConsumerFactory: &myFactory{
+			logger:                   logger,
+			progressReporterInterval: 30 * time.Second,
+		},
+		Logger: logger,
 		Advanced: scyllacdc.AdvancedReaderConfig{
 			ChangeAgeLimit:       15 * time.Minute,
 			ConfidenceWindowSize: 10 * time.Second,
@@ -38,6 +48,7 @@ func main() {
 			PostFailedQueryDelay: 5 * time.Second,
 			QueryTimeWindowSize:  5 * 60 * time.Second,
 		},
+		ProgressManager: progressManager,
 	}
 
 	reader, err := scyllacdc.NewReader(context.Background(), cfg)
@@ -84,4 +95,45 @@ func nullableIntToStr(i *int) string {
 	return fmt.Sprintf("%d", *i)
 }
 
-var changeConsumerFactory = scyllacdc.MakeChangeConsumerFactoryFromFunc(consumeChange)
+type myConsumer struct {
+	// PeriodicProgressReporter is a wrapper around ProgressReporter
+	// which rate-limits saving the progress
+	reporter  *scyllacdc.PeriodicProgressReporter
+	logger    scyllacdc.Logger
+	f         scyllacdc.ChangeConsumerFunc
+	tableName string
+}
+
+func (mc *myConsumer) Consume(ctx context.Context, change scyllacdc.Change) error {
+	// ... do work ...
+	mc.logger.Printf("myConsumer.Consume...\n")
+	err := mc.f(ctx, mc.tableName, change)
+	if err != nil {
+		return err
+	}
+
+	mc.reporter.Update(change.Time)
+	return nil
+}
+
+func (mc *myConsumer) Empty(ctx context.Context, newTime gocql.UUID) error {
+	mc.reporter.Update(newTime)
+	return nil
+}
+
+func (mc *myConsumer) End() error {
+	_ = mc.reporter.SaveAndStop(context.Background())
+	return nil
+}
+
+type myFactory struct {
+	logger                   scyllacdc.Logger
+	progressReporterInterval time.Duration
+}
+
+func (f *myFactory) CreateChangeConsumer(ctx context.Context, input scyllacdc.CreateChangeConsumerInput) (scyllacdc.ChangeConsumer, error) {
+	f.logger.Printf("myFactory.CreateChangeConsumer %s, %s\n", input.TableName, input.StreamID)
+	reporter := scyllacdc.NewPeriodicProgressReporter(f.logger, f.progressReporterInterval, input.ProgressReporter)
+	reporter.Start(ctx)
+	return &myConsumer{reporter, f.logger, consumeChange, input.TableName}, nil
+}

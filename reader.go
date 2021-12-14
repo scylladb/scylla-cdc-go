@@ -85,23 +85,13 @@ type AdvancedReaderConfig struct {
 
 	// The library uses select statements to fetch changes from CDC Log tables.
 	// Each select fetches changes from a single table and fetches only changes
-	// from a limited set of CDC streams. If such select returns one or more
-	// changes then next select to this table and set of CDC streams will be
-	// issued after a delay. This parameter specifies the length of the delay.
-	//
-	// If the parameter is left as 0, the library will automatically adjust
-	// the length of the delay.
-	PostNonEmptyQueryDelay time.Duration
-
-	// The library uses select statements to fetch changes from CDC Log tables.
-	// Each select fetches changes from a single table and fetches only changes
-	// from a limited set of CDC streams. If such select returns no changes then
-	// next select to this table and set of CDC streams will be issued after
+	// from a limited set of CDC streams. The subsequent select after query
+	// execution to this table and set of CDC streams will be issued after
 	// a delay. This parameter specifies the length of the delay.
 	//
 	// If the parameter is left as 0, the library will automatically adjust
 	// the length of the delay.
-	PostEmptyQueryDelay time.Duration
+	PostQueryDelay time.Duration
 
 	// If the library tries to read from the CDC log and the read operation
 	// fails, it will wait some time before attempting to read again. This
@@ -143,8 +133,7 @@ func (arc *AdvancedReaderConfig) setDefaults() {
 	}
 	setIfZero(&arc.ConfidenceWindowSize, 30*time.Second)
 
-	setIfZero(&arc.PostNonEmptyQueryDelay, 10*time.Second)
-	setIfZero(&arc.PostEmptyQueryDelay, 30*time.Second)
+	setIfZero(&arc.PostQueryDelay, 10*time.Second)
 	setIfZero(&arc.PostFailedQueryDelay, 1*time.Second)
 
 	setIfZero(&arc.QueryTimeWindowSize, 30*time.Second)
@@ -268,7 +257,7 @@ func (r *Reader) Run(ctx context.Context) error {
 				}
 			}
 
-			sleepAmount := r.config.Advanced.PostNonEmptyQueryDelay / time.Duration(len(readers))
+			sleepAmount := r.config.Advanced.PostQueryDelay / time.Duration(len(readers))
 			for i := range readers {
 				reader := readers[i]
 				select {

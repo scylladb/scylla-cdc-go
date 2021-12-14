@@ -456,6 +456,14 @@ type ChangeConsumer interface {
 	// If this method returns an error, the library will stop with an error.
 	Consume(ctx context.Context, change Change) error
 
+	// Invoked upon empty results from the CDC log associated with the stream of
+	// the ChangeConsumer. This method is called to acknowledge a query window
+	// has been executed against the stream and the CDC log is to be considered
+	// completed as of 'ackTime' param passed.
+	//
+	// If this method returns an error, the library will stop with an error.
+	Empty(ctx context.Context, ackTime gocql.UUID) error
+
 	// Called after all rows from the stream were consumed, and the reader
 	// is about to switch to a new generation, or stop execution altogether.
 	//
@@ -493,6 +501,10 @@ func (ccfif *changeConsumerFuncInstanceFactory) CreateChangeConsumer(
 type changeConsumerFuncInstance struct {
 	tableName string
 	f         ChangeConsumerFunc
+}
+
+func (ccfi *changeConsumerFuncInstance) Empty(ctx context.Context, newTime gocql.UUID) error {
+	return nil
 }
 
 func (ccfi *changeConsumerFuncInstance) End() error {

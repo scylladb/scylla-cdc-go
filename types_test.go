@@ -315,12 +315,11 @@ func TestTypes(t *testing.T) {
 	})
 
 	adv := AdvancedReaderConfig{
-		ChangeAgeLimit:         time.Minute,
-		PostNonEmptyQueryDelay: 3 * time.Second,
-		PostEmptyQueryDelay:    3 * time.Second,
-		PostFailedQueryDelay:   3 * time.Second,
-		QueryTimeWindowSize:    5 * time.Minute,
-		ConfidenceWindowSize:   time.Millisecond,
+		ChangeAgeLimit:       time.Minute,
+		PostQueryDelay:       3 * time.Second,
+		PostFailedQueryDelay: 3 * time.Second,
+		QueryTimeWindowSize:  5 * time.Minute,
+		ConfidenceWindowSize: time.Millisecond,
 	}
 
 	// Configure a session

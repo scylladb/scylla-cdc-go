@@ -100,6 +100,8 @@ outer:
 
 		if compareTimeuuid(wnd.begin, wnd.end) < 0 {
 			var iter *changeRowIterator
+			//sbr.config.Logger.Printf("queryRange: %s.%s :: %s (%s) [%s ... %s]",
+			//	crq.keyspaceName, crq.tableName, crq.pkCondition, crq.bindArgs[0], wnd.begin.Time(), wnd.end.Time())
 			iter, err = crq.queryRange(wnd.begin, wnd.end)
 			if err != nil {
 				sbr.config.Logger.Printf("error while sending a query (will retry): %s", err)
@@ -112,6 +114,12 @@ outer:
 					return consumerErr
 				}
 				hadRows = rowCount > 0
+
+				if !hadRows {
+					for _, c := range sbr.consumers {
+						err = c.Empty(ctx, wnd.end)
+					}
+				}
 			}
 
 			if err == nil {
@@ -126,10 +134,8 @@ outer:
 		var delay time.Duration
 		if err != nil {
 			delay = sbr.config.Advanced.PostFailedQueryDelay
-		} else if hadRows {
-			delay = sbr.config.Advanced.PostNonEmptyQueryDelay
 		} else {
-			delay = sbr.config.Advanced.PostEmptyQueryDelay
+			delay = sbr.config.Advanced.PostQueryDelay
 		}
 
 		delayUntil := windowProcessingStartTime.Add(delay)
@@ -203,14 +209,14 @@ func (sbr *streamBatchReader) getPollWindow() pollWindow {
 	if queryWindowRightEnd.Before(confidenceWindowStart) {
 		return pollWindow{
 			begin: windowStart,
-			end:   gocql.MinTimeUUID(queryWindowRightEnd),
+			end:   gocql.MinTimeUUID(queryWindowRightEnd.Add(sbr.config.Advanced.PostQueryDelay)),
 
 			touchesConfidenceWindow: false,
 		}
 	}
 	return pollWindow{
 		begin: windowStart,
-		end:   gocql.MinTimeUUID(confidenceWindowStart),
+		end:   gocql.MinTimeUUID(confidenceWindowStart.Add(sbr.config.Advanced.PostQueryDelay)),
 
 		touchesConfidenceWindow: true,
 	}
