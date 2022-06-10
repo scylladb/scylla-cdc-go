@@ -512,30 +512,23 @@ type changeRowQuerier struct {
 	tableName    string
 	session      *gocql.Session
 
-	pkCondition string
 	bindArgs    []interface{}
 	consistency gocql.Consistency
 }
 
 func newChangeRowQuerier(session *gocql.Session, streams []StreamID, keyspaceName, tableName string, consistency gocql.Consistency) *changeRowQuerier {
-	var pkCondition string
-	if len(streams) == 1 {
-		pkCondition = "\"cdc$stream_id\" = ?"
-	} else {
-		pkCondition = "\"cdc$stream_id\" IN (?" + strings.Repeat(", ?", len(streams)-1) + ")"
-	}
-
-	bindArgs := make([]interface{}, len(streams)+2)
+	bindArgs := make([]interface{}, 3)
+	streamsIface := make([]interface{}, len(streams))
 	for i, stream := range streams {
-		bindArgs[i] = stream
+		streamsIface[i] = stream
 	}
+	bindArgs[0] = streamsIface
 
 	return &changeRowQuerier{
 		keyspaceName: keyspaceName,
 		tableName:    tableName,
 		session:      session,
 
-		pkCondition: pkCondition,
 		bindArgs:    bindArgs,
 		consistency: consistency,
 	}
@@ -579,12 +572,11 @@ func (crq *changeRowQuerier) queryRange(start, end gocql.UUID) (*changeRowIterat
 	}
 
 	queryStr := fmt.Sprintf(
-		"SELECT %s FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" <= ? BYPASS CACHE",
+		"SELECT %s FROM %s.%s%s WHERE \"cdc$stream_id\" IN ? AND \"cdc$time\" > ? AND \"cdc$time\" <= ? BYPASS CACHE",
 		strings.Join(colNames, ", "),
 		crq.keyspaceName,
 		crq.tableName,
 		cdcTableSuffix,
-		crq.pkCondition,
 	)
 
 	crq.bindArgs[len(crq.bindArgs)-2] = start
@@ -595,35 +587,35 @@ func (crq *changeRowQuerier) queryRange(start, end gocql.UUID) (*changeRowIterat
 }
 
 // For a given range, returns the cdc$time of the earliest rows for each stream.
-func (crq *changeRowQuerier) findFirstRowsInRange(start, end gocql.UUID) (map[string]gocql.UUID, error) {
-	queryStr := fmt.Sprintf(
-		"SELECT \"cdc$stream_id\", \"cdc$time\" FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" <= ? PER PARTITION LIMIT 1 BYPASS CACHE",
-		crq.keyspaceName,
-		crq.tableName,
-		cdcTableSuffix,
-		crq.pkCondition,
-	)
+// func (crq *changeRowQuerier) findFirstRowsInRange(start, end gocql.UUID) (map[string]gocql.UUID, error) {
+// 	queryStr := fmt.Sprintf(
+// 		"SELECT \"cdc$stream_id\", \"cdc$time\" FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" <= ? PER PARTITION LIMIT 1 BYPASS CACHE",
+// 		crq.keyspaceName,
+// 		crq.tableName,
+// 		cdcTableSuffix,
+// 		crq.pkCondition,
+// 	)
 
-	crq.bindArgs[len(crq.bindArgs)-2] = start
-	crq.bindArgs[len(crq.bindArgs)-1] = end
+// 	crq.bindArgs[len(crq.bindArgs)-2] = start
+// 	crq.bindArgs[len(crq.bindArgs)-1] = end
 
-	ret := make(map[string]gocql.UUID)
-	iter := crq.session.Query(queryStr, crq.bindArgs...).Consistency(crq.consistency).Iter()
+// 	ret := make(map[string]gocql.UUID)
+// 	iter := crq.session.Query(queryStr, crq.bindArgs...).Consistency(crq.consistency).Iter()
 
-	var (
-		streamID StreamID
-		cdcTime  gocql.UUID
-	)
+// 	var (
+// 		streamID StreamID
+// 		cdcTime  gocql.UUID
+// 	)
 
-	for iter.Scan(&streamID, &cdcTime) {
-		ret[string(streamID)] = cdcTime
-	}
+// 	for iter.Scan(&streamID, &cdcTime) {
+// 		ret[string(streamID)] = cdcTime
+// 	}
 
-	if err := iter.Close(); err != nil {
-		return nil, err
-	}
-	return ret, nil
-}
+// 	if err := iter.Close(); err != nil {
+// 		return nil, err
+// 	}
+// 	return ret, nil
+// }
 
 // An adapter over gocql.Iterator which chooses representation for row values
 // which is more suitable for CDC than the default one.
