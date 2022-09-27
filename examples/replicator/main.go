@@ -108,7 +108,7 @@ func main() {
 	// done by the replicator ASAP and stop it.
 	//
 	// 3rd signal will exit the process immediately with error code 1.
-	signalC := make(chan os.Signal)
+	signalC := make(chan os.Signal, 3)
 	go func() {
 		<-signalC
 		now := time.Now()

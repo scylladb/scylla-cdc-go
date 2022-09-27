@@ -47,7 +47,7 @@ func main() {
 
 	// React to Ctrl+C signal, and stop gracefully after the first signal
 	// Second signal exits the process
-	signalC := make(chan os.Signal)
+	signalC := make(chan os.Signal, 2)
 	go func() {
 		<-signalC
 		reader.Stop()
