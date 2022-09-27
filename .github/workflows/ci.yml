@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  SCYLLA_SUBNET: 192.168.100.0/24
+  SCYLLA_SRC_URI: 192.168.100.100
+  SCYLLA_DST_URI: 192.168.100.200
+  SCYLLA_IMAGE: scylladb/scylla
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+    - name: git checkout
+      uses: actions/checkout@v2
+
+    - name: set up Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: ^1.18.0
+        stable: true
+
+    - name: go build
+      run: go build -v ./...
+
+    - name: go vet
+      run: go vet -v ./...
+
+    - name: start the Scylla nodes for the test
+      run: |
+        sudo sh -c "echo 2097152 >> /proc/sys/fs/aio-max-nr"
+        docker-compose -f ./ci/docker-compose.yml up -d
+        until docker-compose -f ./ci/docker-compose.yml exec -T source_node cqlsh -e "select * from system.local" ; do sleep 1; done
+        until docker-compose -f ./ci/docker-compose.yml exec -T destination_node cqlsh -e "select * from system.local" ; do sleep 1; done
+
+    - name: go test
+      run: go test -v ./...
+
+    - name: stop the Scylla nodes
+      run: docker-compose -f ./ci/docker-compose.yml stop
