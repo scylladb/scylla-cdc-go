@@ -118,6 +118,14 @@ outer:
 				// If there were no errors, then we can safely advance
 				// all streams to the window end
 				sbr.advanceAllStreamsTo(wnd.end)
+
+				if !hadRows {
+					for _, c := range sbr.consumers {
+						if enc, ok := c.(ChangeOrEmptyNotificationConsumer); ok {
+							err = enc.Empty(ctx, wnd.end)
+						}
+					}
+				}
 			}
 		}
 
