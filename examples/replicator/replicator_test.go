@@ -12,11 +12,7 @@ import (
 
 	"github.com/gocql/gocql"
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
-)
-
-const (
-	sourceAddress      = "127.0.0.1"
-	destinationAddress = "127.0.0.2"
+	"github.com/scylladb/scylla-cdc-go/internal/testutils"
 )
 
 type schema struct {
@@ -25,49 +21,49 @@ type schema struct {
 }
 
 var udts = []string{
-	"CREATE TYPE ks.udt_simple (a int, b int, c text)",
+	"CREATE TYPE udt_simple (a int, b int, c text)",
 }
 
 var (
 	schemaSimple = schema{
-		"ks.tbl_simple",
-		"CREATE TABLE ks.tbl_simple (pk text, ck int, v1 int, v2 text, PRIMARY KEY (pk, ck))",
+		"tbl_simple",
+		"CREATE TABLE tbl_simple (pk text, ck int, v1 int, v2 text, PRIMARY KEY (pk, ck))",
 	}
 	schemaMultipleClusteringKeys = schema{
-		"ks.tbl_multiple_clustering_keys",
-		"CREATE TABLE ks.tbl_multiple_clustering_keys (pk text, ck1 int, ck2 int, v int, PRIMARY KEY (pk, ck1, ck2))",
+		"tbl_multiple_clustering_keys",
+		"CREATE TABLE tbl_multiple_clustering_keys (pk text, ck1 int, ck2 int, v int, PRIMARY KEY (pk, ck1, ck2))",
 	}
 	schemaBlobs = schema{
-		"ks.tbl_blobs",
-		"CREATE TABLE ks.tbl_blobs (pk text, ck int, v blob, PRIMARY KEY (pk, ck))",
+		"tbl_blobs",
+		"CREATE TABLE tbl_blobs (pk text, ck int, v blob, PRIMARY KEY (pk, ck))",
 	}
 	schemaLists = schema{
-		"ks.tbl_lists",
-		"CREATE TABLE ks.tbl_lists (pk text, ck int, v list<int>, PRIMARY KEY(pk, ck))",
+		"tbl_lists",
+		"CREATE TABLE tbl_lists (pk text, ck int, v list<int>, PRIMARY KEY(pk, ck))",
 	}
 	schemaSets = schema{
-		"ks.tbl_sets",
-		"CREATE TABLE ks.tbl_sets (pk text, ck int, v set<int>, PRIMARY KEY (pk, ck))",
+		"tbl_sets",
+		"CREATE TABLE tbl_sets (pk text, ck int, v set<int>, PRIMARY KEY (pk, ck))",
 	}
 	schemaMaps = schema{
-		"ks.tbl_maps",
-		"CREATE TABLE ks.tbl_maps (pk text, ck int, v map<int, int>, PRIMARY KEY (pk, ck))",
+		"tbl_maps",
+		"CREATE TABLE tbl_maps (pk text, ck int, v map<int, int>, PRIMARY KEY (pk, ck))",
 	}
 	schemaTuples = schema{
-		"ks.tbl_tuples",
-		"CREATE TABLE ks.tbl_tuples (pk text, ck int, v tuple<int, text>, PRIMARY KEY (pk, ck))",
+		"tbl_tuples",
+		"CREATE TABLE tbl_tuples (pk text, ck int, v tuple<int, text>, PRIMARY KEY (pk, ck))",
 	}
 	schemaTuplesInTuples = schema{
-		"ks.tbl_tuples_in_tuples",
-		"CREATE TABLE ks.tbl_tuples_in_tuples (pk text, ck int, v tuple<tuple<int, text>, int>, PRIMARY KEY (pk, ck))",
+		"tbl_tuples_in_tuples",
+		"CREATE TABLE tbl_tuples_in_tuples (pk text, ck int, v tuple<tuple<int, text>, int>, PRIMARY KEY (pk, ck))",
 	}
 	schemaTuplesInTuplesInTuples = schema{
-		"ks.tbl_tuples_in_tuples_in_tuples",
-		"CREATE TABLE ks.tbl_tuples_in_tuples_in_tuples (pk text, ck int, v tuple<tuple<tuple<int, int>, text>, int>, PRIMARY KEY (pk, ck))",
+		"tbl_tuples_in_tuples_in_tuples",
+		"CREATE TABLE tbl_tuples_in_tuples_in_tuples (pk text, ck int, v tuple<tuple<tuple<int, int>, text>, int>, PRIMARY KEY (pk, ck))",
 	}
 	schemaUDTs = schema{
-		"ks.tbl_udts",
-		"CREATE TABLE ks.tbl_udts (pk text, ck int, v ks.udt_simple, PRIMARY KEY (pk, ck))",
+		"tbl_udts",
+		"CREATE TABLE tbl_udts (pk text, ck int, v udt_simple, PRIMARY KEY (pk, ck))",
 	}
 )
 
@@ -355,11 +351,14 @@ func TestReplicator(t *testing.T) {
 		schemas[tc.schema.tableName] = tc.schema.createQuery
 	}
 
-	// TODO: Provide IPs from the env
-	sourceSession := createSessionAndSetupSchema(t, sourceAddress, true, schemas)
+	sourceAddress := testutils.GetSourceClusterContactPoint()
+	destinationAddress := testutils.GetDestinationClusterContactPoint()
+	keyspaceName := testutils.GetUniqueName("test_keyspace")
+
+	sourceSession := createSessionAndSetupSchema(t, sourceAddress, keyspaceName, true, schemas)
 	defer sourceSession.Close()
 
-	destinationSession := createSessionAndSetupSchema(t, destinationAddress, false, schemas)
+	destinationSession := createSessionAndSetupSchema(t, destinationAddress, keyspaceName, false, schemas)
 	defer destinationSession.Close()
 
 	// Execute all of the queries
@@ -385,7 +384,7 @@ func TestReplicator(t *testing.T) {
 
 	schemaNames := make([]string, 0)
 	for tbl := range schemas {
-		schemaNames = append(schemaNames, tbl)
+		schemaNames = append(schemaNames, fmt.Sprintf("%s.%s", keyspaceName, tbl))
 	}
 
 	logger := log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
@@ -471,15 +470,15 @@ func TestReplicator(t *testing.T) {
 	}
 }
 
-func createSessionAndSetupSchema(t *testing.T, addr string, withCdc bool, schemas map[string]string) *gocql.Session {
+func createSessionAndSetupSchema(t *testing.T, addr string, keyspaceName string, withCdc bool, schemas map[string]string) *gocql.Session {
+	testutils.CreateKeyspace(t, addr, keyspaceName)
+
 	cfg := gocql.NewCluster(addr)
+	cfg.Keyspace = keyspaceName
 	session, err := cfg.CreateSession()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	execQuery(t, session, "DROP KEYSPACE IF EXISTS ks")
-	execQuery(t, session, "CREATE KEYSPACE ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}")
 
 	for _, udt := range udts {
 		execQuery(t, session, udt)

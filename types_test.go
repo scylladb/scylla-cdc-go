@@ -12,11 +12,7 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
-)
-
-const (
-	// TODO: Take it from env
-	address = "127.0.0.1"
+	"github.com/scylladb/scylla-cdc-go/internal/testutils"
 )
 
 type change map[string]interface{}
@@ -28,7 +24,7 @@ var typesTestCases = []struct {
 	expectedChanges []change
 }{
 	{
-		"ks.types_simple",
+		"types_simple",
 		"CREATE TABLE %s (pk int, ck int, v1 int, v2 text, v3 blob, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v1) VALUES (1, 2, 3)",
@@ -62,7 +58,7 @@ var typesTestCases = []struct {
 		},
 	},
 	{
-		"ks.types_lists",
+		"types_lists",
 		"CREATE TABLE %s (pk int, ck int, v list<int>, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, [1, 2, 3])",
@@ -81,7 +77,7 @@ var typesTestCases = []struct {
 			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
 		},
 	}, {
-		"ks.types_lists_with_tuples",
+		"types_lists_with_tuples",
 		"CREATE TABLE %s (pk int, ck int, v list<frozen<tuple<int, text>>>, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, [(1, 'abc'), (2, 'def')])",
@@ -101,7 +97,7 @@ var typesTestCases = []struct {
 		},
 	},
 	{
-		"ks.types_maps",
+		"types_maps",
 		"CREATE TABLE %s (pk int, ck int, v map<int, text>, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, {1: 'abc', 2: 'def'})",
@@ -119,7 +115,7 @@ var typesTestCases = []struct {
 		},
 	},
 	{
-		"ks.types_sets",
+		"types_sets",
 		"CREATE TABLE %s (pk int, ck int, v set<int>, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, {1, 2})",
@@ -137,8 +133,8 @@ var typesTestCases = []struct {
 		},
 	},
 	{
-		"ks.types_sets_of_udts",
-		"CREATE TABLE %s (pk int, ck int, v set<frozen<ks.udt>>, PRIMARY KEY (pk, ck))",
+		"types_sets_of_udts",
+		"CREATE TABLE %s (pk int, ck int, v set<frozen<udt>>, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, {(1, 'abc'), (2, 'def')})",
 			"UPDATE %s SET v = {(null, 'ghi'), (4, null)} WHERE pk = 1 AND ck = 1",
@@ -155,7 +151,7 @@ var typesTestCases = []struct {
 		},
 	},
 	{
-		"ks.types_tuples",
+		"types_tuples",
 		"CREATE TABLE %s (pk int, ck int, v tuple<int, text>, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, (2, 'abc'))",
@@ -187,7 +183,7 @@ var typesTestCases = []struct {
 		},
 	},
 	{
-		"ks.types_tuples_in_tuples",
+		"types_tuples_in_tuples",
 		"CREATE TABLE %s (pk int, ck int, v tuple<tuple<int, text>, int>, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, ((1, 'abc'), 7))",
@@ -209,8 +205,8 @@ var typesTestCases = []struct {
 		},
 	},
 	{
-		"ks.types_udts",
-		"CREATE TABLE %s (pk int, ck int, v ks.udt, PRIMARY KEY (pk, ck))",
+		"types_udts",
+		"CREATE TABLE %s (pk int, ck int, v udt, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, (2, 'abc'))",
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, (2, null))",
@@ -249,8 +245,8 @@ var typesTestCases = []struct {
 		},
 	},
 	{
-		"ks.types_nested_udts",
-		"CREATE TABLE %s (pk int, ck int, v ks.udt_nested, PRIMARY KEY (pk, ck))",
+		"types_nested_udts",
+		"CREATE TABLE %s (pk int, ck int, v udt_nested, PRIMARY KEY (pk, ck))",
 		[]string{
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, ((2, 'abc'), 3))",
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, ((null, 'abc'), null))",
@@ -324,7 +320,10 @@ func TestTypes(t *testing.T) {
 	}
 
 	// Configure a session
+	address := testutils.GetSourceClusterContactPoint()
+	keyspaceName := testutils.CreateUniqueKeyspace(t, address)
 	cluster := gocql.NewCluster(address)
+	cluster.Keyspace = keyspaceName
 	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
 	session, err := cluster.CreateSession()
 	if err != nil {
@@ -333,11 +332,8 @@ func TestTypes(t *testing.T) {
 	defer session.Close()
 
 	// Create all tables and input all data
-	execQuery(t, session, "DROP KEYSPACE IF EXISTS ks")
-	execQuery(t, session, "CREATE KEYSPACE ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}")
-
-	execQuery(t, session, "CREATE TYPE ks.udt (a int, b text)")
-	execQuery(t, session, "CREATE TYPE ks.udt_nested (a frozen<ks.udt>, b int)")
+	execQuery(t, session, "CREATE TYPE udt (a int, b text)")
+	execQuery(t, session, "CREATE TYPE udt_nested (a frozen<udt>, b int)")
 
 	for _, tc := range typesTestCases {
 		execQuery(t, session, fmt.Sprintf(tc.schema, tc.tableName)+" WITH cdc = {'enabled': true, 'preimage': true, 'postimage': true}")
@@ -349,7 +345,7 @@ func TestTypes(t *testing.T) {
 
 	var tableNames []string
 	for _, tc := range typesTestCases {
-		tableNames = append(tableNames, tc.tableName)
+		tableNames = append(tableNames, fmt.Sprintf("%s.%s", keyspaceName, tc.tableName))
 	}
 
 	// Configuration for the CDC reader
@@ -381,7 +377,7 @@ func TestTypes(t *testing.T) {
 	// Verify
 	t.Log("verifying results")
 	for _, tc := range typesTestCases {
-		changesForTable := changeRows[tc.tableName]
+		changesForTable := changeRows[fmt.Sprintf("%s.%s", keyspaceName, tc.tableName)]
 
 		if len(changesForTable) != len(tc.expectedChanges) {
 			t.Errorf("%s: expected %d changes, got %d", tc.tableName, len(tc.expectedChanges), len(changesForTable))
