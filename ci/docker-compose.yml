@@ -1,0 +1,23 @@
+version: "3.7"
+
+services:
+  source_node:
+    image: scylladb/scylla
+    command: --seeds ${SCYLLA_SRC_URI} --skip-wait-for-gossip-to-settle 0
+    networks:
+      public:
+        ipv4_address: ${SCYLLA_SRC_URI}
+  destination_node:
+    image: scylladb/scylla
+    command: --seeds ${SCYLLA_DST_URI} --skip-wait-for-gossip-to-settle 0
+    networks:
+      public:
+        ipv4_address: ${SCYLLA_DST_URI}
+
+networks:
+  public:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${SCYLLA_SUBNET}
