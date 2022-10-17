@@ -294,17 +294,37 @@ func (r *Reader) Run(ctx context.Context) error {
 			genErrG, genCtx := errgroup.WithContext(runCtx)
 
 			readers := make([]*streamBatchReader, 0, len(split)*len(r.config.TableNames))
-			for _, tableName := range r.config.TableNames {
+			for _, fullTableName := range r.config.TableNames {
 				// TODO: This is ugly?
-				splitName := strings.SplitN(tableName, ".", 2)
+				splitName := strings.SplitN(fullTableName, ".", 2)
+				keyspaceName := splitName[0]
+				tableName := splitName[1]
+
+				// Fetch the current table's TTL
+				startTime := r.readFrom
+				ttl, err := fetchScyllaCDCExtensionTTL(r.config.Session, keyspaceName, tableName)
+				if err == nil {
+					if ttl != 0 {
+						l.Printf("the TTL for %s.%s is %d seconds", keyspaceName, tableName, ttl)
+						ttlBound := time.Now().Add(-time.Duration(ttl) * time.Second)
+						if startTime.Before(ttlBound) {
+							startTime = ttlBound
+						}
+					} else {
+						l.Printf("the table %s.%s has not TTL set", keyspaceName, tableName)
+					}
+				} else {
+					l.Printf("failed to fetch TTL for table %s.%s, assuming no TTL; error: %s", keyspaceName, tableName, err)
+				}
+
 				for _, group := range split {
 					readers = append(readers, newStreamBatchReader(
 						r.config,
 						gen.startTime,
 						group,
-						splitName[0],
-						splitName[1],
-						gocql.MinTimeUUID(r.readFrom),
+						keyspaceName,
+						tableName,
+						gocql.MinTimeUUID(startTime),
 					))
 				}
 			}

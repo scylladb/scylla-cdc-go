@@ -216,3 +216,81 @@ func TestConsumerResumesWithTableBackedProgressReporter(t *testing.T) {
 		}
 	}
 }
+
+func TestConsumerHonorsTableTTL(t *testing.T) {
+	// Make sure that the library doesn't attempt to read earlier than
+	// the table TTL
+
+	// Configure a session
+	address := testutils.GetSourceClusterContactPoint()
+	keyspaceName := testutils.CreateUniqueKeyspace(t, address)
+	cluster := gocql.NewCluster(address)
+	cluster.Keyspace = keyspaceName
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	// Create a table with a very short TTL
+	execQuery(t, session, "CREATE TABLE tbl (pk int PRIMARY KEY, v int) WITH cdc = {'enabled': true, 'ttl': 2}")
+
+	startTime := time.Now()
+	endTime := startTime.Add(2 * time.Second)
+
+	adv := AdvancedReaderConfig{
+		PostNonEmptyQueryDelay: 100 * time.Millisecond,
+		PostEmptyQueryDelay:    100 * time.Millisecond,
+		PostFailedQueryDelay:   100 * time.Millisecond,
+		QueryTimeWindowSize:    500 * time.Millisecond,
+		ConfidenceWindowSize:   time.Millisecond,
+		ChangeAgeLimit:         time.Minute, // should be overriden by the TTL
+	}
+
+	consumer := &recordingConsumer{mu: &sync.Mutex{}}
+
+	cfg := &ReaderConfig{
+		Session:               session,
+		ChangeConsumerFactory: consumer,
+		TableNames:            []string{keyspaceName + ".tbl"},
+		Advanced:              adv,
+		Logger:                log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
+	}
+
+	reader, err := NewReader(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errC := make(chan error)
+	go func() { errC <- reader.Run(context.Background()) }()
+
+	time.Sleep(500 * time.Millisecond)
+
+	reader.StopAt(endTime)
+	if err := <-errC; err != nil {
+		t.Fatal(err)
+	}
+
+	// All timestamps should be roughly between startTime-TTL and endTime
+	// To adjust for different clock on the scylla node, allow the time
+	// to exceed one second
+	acceptableStart := startTime.Add(-time.Second).Add(-2 * time.Second)
+	acceptableEnd := startTime.Add(2 * time.Second).Add(time.Second)
+
+	timestamps := consumer.GetTimestamps()
+
+	if len(timestamps) == 0 {
+		t.Fatal("no empty event timestamps recorded")
+	}
+
+	for _, tstp := range timestamps {
+		early := !acceptableStart.Before(tstp.Time())
+		late := !tstp.Time().Before(acceptableEnd)
+		if early || late {
+			t.Errorf("timestamp of empty event %s not in expected range %s, %s",
+				tstp.Time(), acceptableStart, acceptableEnd)
+		}
+	}
+}
