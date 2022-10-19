@@ -63,6 +63,30 @@ type ProgressManager interface {
 	SaveProgress(ctx context.Context, gen time.Time, table string, streamID StreamID, progress Progress) error
 }
 
+// ProgressManagerWithStartTime is an extension to the ProgressManager interface.
+type ProgressManagerWithStartTime interface {
+	ProgressManager
+
+	// GetApplicationReadStartTime returns the timestamp from which
+	// the application started reading data. The library uses this timestamp
+	// as a lower bound to determine where it should start reading. For example,
+	// if there is no generation saved or there is no progress information
+	// saved for a stream, reading will be restarted from the given timestamp
+	// (or higher if the generation timestamp is higher).
+	//
+	// If this function returns a zero timeuuid, the library will start reading
+	// from `time.Now() - AdvancedReaderConfig.ChangeAgeLimit`.
+	// If this function returns an error, the library will stop with an error.
+	GetApplicationReadStartTime(ctx context.Context) (time.Time, error)
+
+	// SaveApplicationReadStartTime stores information about the timestamp
+	// from which the application originally started reading data.
+	// It is called by the library if there was no start timestamp saved.
+	//
+	// If this function returns an error, the library will stop with an error.
+	SaveApplicationReadStartTime(ctx context.Context, startTime time.Time) error
+}
+
 // ProgressReporter is a helper object for the ChangeConsumer. It allows
 // the consumer to save its progress.
 type ProgressReporter struct {
@@ -242,4 +266,33 @@ func (tbpm *TableBackedProgressManager) SaveProgress(ctx context.Context, gen ti
 	).Exec()
 }
 
+// SaveApplicationReadStartTime is needed to implement the ProgressManagerWithStartTime interface.
+func (tbpm *TableBackedProgressManager) SaveApplicationReadStartTime(ctx context.Context, startTime time.Time) error {
+	// Store information about the timestamp in the `last_timestamp` column,
+	// in the special partition with "zero generation".
+	return tbpm.session.Query(
+		fmt.Sprintf(
+			"INSERT INTO %s (generation, application_name, table_name, stream_id, last_timestamp) "+
+				"VALUES (?, ?, ?, ?, ?)",
+			tbpm.progressTableName,
+		),
+		time.Time{}, tbpm.applicationName, "", []byte{}, gocql.MinTimeUUID(startTime),
+	).Exec()
+}
+
+// GetApplicationReadStartTime is needed to implement the ProgressManagerWithStartTime interface.
+func (tbpm *TableBackedProgressManager) GetApplicationReadStartTime(ctx context.Context) (time.Time, error) {
+	// Retrieve the information from the special column
+	var timestamp gocql.UUID
+	err := tbpm.session.Query(
+		fmt.Sprintf("SELECT last_timestamp FROM %s WHERE generation = ? AND application_name = ? AND table_name = ? AND stream_id = ?", tbpm.progressTableName),
+		time.Time{}, tbpm.applicationName, "", []byte{},
+	).Scan(&timestamp)
+	if err != nil && err != gocql.ErrNotFound {
+		return time.Time{}, err
+	}
+	return timestamp.Time(), nil
+}
+
 var _ ProgressManager = (*TableBackedProgressManager)(nil)
+var _ ProgressManagerWithStartTime = (*TableBackedProgressManager)(nil)

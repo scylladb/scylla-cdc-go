@@ -180,15 +180,9 @@ func NewReader(ctx context.Context, config *ReaderConfig) (*Reader, error) {
 		return nil, err
 	}
 
-	readFrom, err := config.ProgressManager.GetCurrentGeneration(ctx)
+	readFrom, err := determineStartTimestamp(ctx, config)
 	if err != nil {
 		return nil, err
-	}
-	if readFrom.IsZero() {
-		readFrom = time.Now().Add(-config.Advanced.ChangeAgeLimit)
-		config.Logger.Printf("no saved progress found, will start reading from %v", readFrom)
-	} else {
-		config.Logger.Printf("last saved progress was at generation %v", readFrom)
 	}
 
 	genFetcher, err := newGenerationFetcher(
@@ -207,6 +201,53 @@ func NewReader(ctx context.Context, config *ReaderConfig) (*Reader, error) {
 		stoppedCh:  make(chan struct{}),
 	}
 	return reader, nil
+}
+
+func determineStartTimestamp(ctx context.Context, config *ReaderConfig) (time.Time, error) {
+	mostRecentGeneration, err := config.ProgressManager.GetCurrentGeneration(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if mostRecentGeneration.IsZero() {
+		config.Logger.Printf("no information about the last generation was found")
+	} else {
+		config.Logger.Printf("last saved progress was at generation %v", mostRecentGeneration)
+	}
+
+	var applicationStartTime time.Time
+	if withStartTime, ok := config.ProgressManager.(ProgressManagerWithStartTime); ok {
+		applicationStartTime, err = withStartTime.GetApplicationReadStartTime(ctx)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if applicationStartTime.IsZero() {
+			config.Logger.Printf("no information about the application start time was found")
+		} else {
+			config.Logger.Printf("application started reading from time point %v", mostRecentGeneration)
+		}
+	}
+
+	// Choose the maximum of those two
+	readFrom := mostRecentGeneration
+	if readFrom.Before(applicationStartTime) {
+		readFrom = applicationStartTime
+	}
+
+	// If the timestamp is still zero, calculate the start time based on ChangeAgeLimit
+	if readFrom.IsZero() {
+		config.Logger.Printf("neither last generation nor application start time is available, will use ChangeAgeLimit")
+		readFrom = time.Now().Add(-config.Advanced.ChangeAgeLimit)
+
+		// Need to save this timestamp, if the ProgressManager supports that
+		if withStartTime, ok := config.ProgressManager.(ProgressManagerWithStartTime); ok {
+			if err := withStartTime.SaveApplicationReadStartTime(ctx, readFrom); err != nil {
+				return time.Time{}, err
+			}
+		}
+	}
+
+	config.Logger.Printf("the application will start reading from %v or later (depending on per-stream saved progress)", readFrom)
+	return readFrom, nil
 }
 
 // Run runs the CDC reader. This call is blocking and returns after an error occurs, or the reader
@@ -253,17 +294,37 @@ func (r *Reader) Run(ctx context.Context) error {
 			genErrG, genCtx := errgroup.WithContext(runCtx)
 
 			readers := make([]*streamBatchReader, 0, len(split)*len(r.config.TableNames))
-			for _, tableName := range r.config.TableNames {
+			for _, fullTableName := range r.config.TableNames {
 				// TODO: This is ugly?
-				splitName := strings.SplitN(tableName, ".", 2)
+				splitName := strings.SplitN(fullTableName, ".", 2)
+				keyspaceName := splitName[0]
+				tableName := splitName[1]
+
+				// Fetch the current table's TTL
+				startTime := r.readFrom
+				ttl, err := fetchScyllaCDCExtensionTTL(r.config.Session, keyspaceName, tableName)
+				if err == nil {
+					if ttl != 0 {
+						l.Printf("the TTL for %s.%s is %d seconds", keyspaceName, tableName, ttl)
+						ttlBound := time.Now().Add(-time.Duration(ttl) * time.Second)
+						if startTime.Before(ttlBound) {
+							startTime = ttlBound
+						}
+					} else {
+						l.Printf("the table %s.%s has not TTL set", keyspaceName, tableName)
+					}
+				} else {
+					l.Printf("failed to fetch TTL for table %s.%s, assuming no TTL; error: %s", keyspaceName, tableName, err)
+				}
+
 				for _, group := range split {
 					readers = append(readers, newStreamBatchReader(
 						r.config,
 						gen.startTime,
 						group,
-						splitName[0],
-						splitName[1],
-						gocql.MinTimeUUID(r.readFrom),
+						keyspaceName,
+						tableName,
+						gocql.MinTimeUUID(startTime),
 					))
 				}
 			}

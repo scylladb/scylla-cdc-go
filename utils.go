@@ -2,7 +2,11 @@ package scyllacdc
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -161,4 +165,108 @@ func shouldEscape(s string) bool {
 
 func escapeColumnName(s string) string {
 	return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\""
+}
+
+func fetchScyllaCDCExtensionTTL(
+	session *gocql.Session,
+	keyspaceName string,
+	tableName string,
+) (int64, error) {
+	// Extensions are not available in the metadata,
+	// fetch and parse them manually until this is implemented in gocql
+	var exts map[string][]byte
+	err := session.Query(
+		"SELECT extensions FROM system_schema.tables "+
+			"WHERE keyspace_name = ? AND table_name = ?",
+		keyspaceName, tableName,
+	).Scan(&exts)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query system tables: %w", err)
+	}
+
+	ext, ok := exts["cdc"]
+	if !ok {
+		return 0, errors.New("cdc extension not found")
+	}
+
+	m, err := newExtensionParser(ext).parseStringMap()
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse the CDC extension: %w", err)
+	}
+
+	ttlS, ok := m["ttl"]
+	if !ok {
+		return 0, errors.New("ttl not set")
+	}
+
+	ttl, err := strconv.ParseInt(ttlS, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse TTL from schema extension: %w", err)
+	}
+	return ttl, nil
+}
+
+type extensionParser struct {
+	raw []byte
+}
+
+func newExtensionParser(raw []byte) *extensionParser {
+	return &extensionParser{raw}
+}
+
+func (ep *extensionParser) parseStringMap() (map[string]string, error) {
+	l, err := ep.parseInt()
+	if err != nil {
+		return nil, err
+	}
+	if l < 0 {
+		return nil, errors.New("invalid map length")
+	}
+
+	m := make(map[string]string)
+
+	for i := int32(0); i < l; i++ {
+		k, err := ep.parseString()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse key #%d: %w", i, err)
+		}
+		v, err := ep.parseString()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse value #%d: %w", i, err)
+		}
+		m[k] = v
+	}
+
+	return m, nil
+}
+
+func (ep *extensionParser) parseInt() (int32, error) {
+	if len(ep.raw) < 4 {
+		return 0, io.EOF
+	}
+
+	// Little endian
+	x := int32(ep.raw[0]) |
+		(int32(ep.raw[1]) << 8) |
+		(int32(ep.raw[2]) << 16) |
+		(int32(ep.raw[3]) << 24)
+
+	ep.raw = ep.raw[4:]
+	return x, nil
+}
+
+func (ep *extensionParser) parseString() (string, error) {
+	l, err := ep.parseInt()
+	if err != nil {
+		return "", fmt.Errorf("failed to parse string length: %w", err)
+	}
+	if l < 0 {
+		return "", errors.New("invalid string length")
+	}
+	if len(ep.raw) < int(l) {
+		return "", io.EOF
+	}
+	s := string(ep.raw[:l])
+	ep.raw = ep.raw[l:]
+	return s, nil
 }

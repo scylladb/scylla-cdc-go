@@ -468,6 +468,15 @@ func (r *DeltaReplicator) End() error {
 	return nil
 }
 
+func (r *DeltaReplicator) Empty(ctx context.Context, ackTime gocql.UUID) error {
+	log.Printf("Streams [%s]: saw no changes up to %s", r.streamID, ackTime.Time())
+	r.reporter.Update(ackTime)
+	return nil
+}
+
+// Make sure that DeltaReplicator supports the ChangeOrEmptyNotificationConsumer interface
+var _ scyllacdc.ChangeOrEmptyNotificationConsumer = (*DeltaReplicator)(nil)
+
 func (r *DeltaReplicator) processUpdate(ctx context.Context, timestamp int64, c *scyllacdc.ChangeRow) error {
 	return r.processInsertOrUpdate(ctx, timestamp, false, c)
 }

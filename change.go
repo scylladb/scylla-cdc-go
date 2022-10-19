@@ -463,6 +463,20 @@ type ChangeConsumer interface {
 	End() error
 }
 
+// ChangeOrEmptyNotificationConsumer is an extension to the ChangeConsumer
+// interface.
+type ChangeOrEmptyNotificationConsumer interface {
+	ChangeConsumer
+
+	// Invoked upon empty results from the CDC log associated with the stream of
+	// the ChangeConsumer. This method is called to acknowledge a query window
+	// has been executed against the stream and the CDC log is to be considered
+	// completed as of 'ackTime' param passed.
+	//
+	// If this method returns an error, the library will stop with an error.
+	Empty(ctx context.Context, ackTime gocql.UUID) error
+}
+
 // MakeChangeConsumerFactoryFromFunc can be used if your processing is very
 // simple, and don't need to keep any per-stream state or save any progress.
 // The function supplied as an argument will be shared by all consumers created
