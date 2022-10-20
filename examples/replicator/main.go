@@ -51,12 +51,11 @@ func main() {
 	clWrite := parseConsistency(writeConsistency)
 
 	adv := scyllacdc.AdvancedReaderConfig{
-		ConfidenceWindowSize:   30 * time.Second,
-		ChangeAgeLimit:         10 * time.Minute,
-		QueryTimeWindowSize:    60 * time.Second,
-		PostEmptyQueryDelay:    30 * time.Second,
-		PostNonEmptyQueryDelay: 10 * time.Second,
-		PostFailedQueryDelay:   1 * time.Second,
+		ConfidenceWindowSize: 30 * time.Second,
+		ChangeAgeLimit:       10 * time.Minute,
+		QueryTimeWindowSize:  60 * time.Second,
+		PostQueryDelay:       10 * time.Second,
+		PostFailedQueryDelay: 1 * time.Second,
 	}
 
 	fmt.Println("Parameters:")
@@ -71,8 +70,7 @@ func main() {
 	fmt.Printf("  Confidence window size: %s\n", adv.ConfidenceWindowSize)
 	fmt.Printf("  Change age limit: %s\n", adv.ChangeAgeLimit)
 	fmt.Printf("  Query window size: %s\n", adv.QueryTimeWindowSize)
-	fmt.Printf("  Delay after poll with empty results: %s\n", adv.PostEmptyQueryDelay)
-	fmt.Printf("  Delay after poll with non-empty results: %s\n", adv.PostNonEmptyQueryDelay)
+	fmt.Printf("  Delay after poll with non-empty results: %s\n", adv.PostQueryDelay)
 	fmt.Printf("  Delay after failed poll: %s\n", adv.PostFailedQueryDelay)
 
 	var fullyQualifiedTables []string

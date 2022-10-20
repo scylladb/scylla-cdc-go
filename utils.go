@@ -75,6 +75,7 @@ func (ppr *PeriodicProgressReporter) Start(ctx context.Context) {
 				ppr.mu.Unlock()
 
 				// TODO: Log errors?
+				//ppr.logger.Printf("MarkProgress for %s: %s", ppr.reporter.streamID, timeToReport.Time())
 				err := ppr.reporter.MarkProgress(ctx, Progress{timeToReport})
 				if err != nil {
 					ppr.logger.Printf("failed to save progress for %s: %s", ppr.reporter.streamID, err)
