@@ -46,7 +46,7 @@ a ChangeConsumer and a ChangeConsumerFactory:
 		nextID int
 	}
 
-	func (f *myFactory) CreateChangeConsumer(ctx context.Context, input scyllacdc.CreateChangeConsumerInput) (ChangeConsumer, error)
+	func (f *myFactory) CreateChangeConsumer(ctx context.Context, input scyllacdc.CreateChangeConsumerInput) (scyllacdc.ChangeConsumer, error) {
 		f.nextID++
 		return &myConsumer{
 			id:        f.nextID-1,
