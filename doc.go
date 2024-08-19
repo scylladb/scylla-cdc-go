@@ -6,7 +6,7 @@ It is recommended to get familiar with the Scylla CDC documentation first
 in order to understand the concepts used in the documentation of scyllacdc:
 https://docs.scylladb.com/using-scylla/cdc/
 
-Overview
+# Overview
 
 The library hides the complexity of reading from CDC log stemming from
 the need for polling for changes and handling topology changes. It reads
@@ -14,7 +14,7 @@ changes from CDC logs of selected tables and propagates them to instances
 of ChangeConsumer - which is an interface that is meant to be implemented
 by the user.
 
-Getting started
+# Getting started
 
 To start working with the library, you first need to implement your own
 logic for consuming changes. The simplest way to do it is to define
@@ -95,7 +95,7 @@ Next, you need to create and run a scyllacdc.Reader object:
 		}
 	}
 
-Saving progress
+# Saving progress
 
 The library supports saving progress and restoring from the last saved position.
 To enable it, you need to do two things:
@@ -147,7 +147,7 @@ In the main function:
 
 	cfg.ProgressReporter = scyllacdc.NewTableBackedProgressManager("my_keyspace.progress_table", "my_application_name")
 
-Processing changes
+# Processing changes
 
 Data from the CDC log is supplied to the ChangeConsumer through Change objects,
 which can contain multiple ChangeRow objects. A single ChangeRow corresponds
@@ -179,6 +179,5 @@ to a single, full (all columns included) row from the CDC log.
 
 		return nil
 	}
-
 */
 package scyllacdc

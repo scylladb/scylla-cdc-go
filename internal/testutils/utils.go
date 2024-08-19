@@ -13,7 +13,7 @@ import (
 
 var (
 	testStartTimestamp time.Time
-	currentTestNumber  uint32 = 0
+	currentTestNumber  uint32
 )
 
 func init() {
@@ -22,8 +22,8 @@ func init() {
 
 func GetUniqueName(prefix string) string {
 	unixNano := testStartTimestamp.UnixNano()
-	uniqueId := atomic.AddUint32(&currentTestNumber, 1) - 1
-	return fmt.Sprintf("%s_%d_%d", prefix, unixNano, uniqueId)
+	uniqueID := atomic.AddUint32(&currentTestNumber, 1) - 1
+	return fmt.Sprintf("%s_%d_%d", prefix, unixNano, uniqueID)
 }
 
 func GetSourceClusterContactPoint() string {
@@ -42,7 +42,9 @@ func GetDestinationClusterContactPoint() string {
 	return uri
 }
 
-func CreateKeyspace(t *testing.T, contactPoint string, keyspaceName string) {
+func CreateKeyspace(t *testing.T, contactPoint, keyspaceName string) {
+	t.Helper()
+
 	cluster := gocql.NewCluster(contactPoint)
 	session, err := cluster.CreateSession()
 	if err != nil {
@@ -62,6 +64,8 @@ func CreateKeyspace(t *testing.T, contactPoint string, keyspaceName string) {
 }
 
 func CreateUniqueKeyspace(t *testing.T, contactPoint string) string {
+	t.Helper()
+
 	keyspaceName := GetUniqueName("test_keyspace")
 	CreateKeyspace(t, contactPoint, keyspaceName)
 	return keyspaceName

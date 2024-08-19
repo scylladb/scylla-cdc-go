@@ -1,4 +1,4 @@
-package scyllacdc
+package scyllacdc_test
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+
+	scyllacdc "github.com/scylladb/scylla-cdc-go"
 	"github.com/scylladb/scylla-cdc-go/internal/testutils"
 )
 
@@ -17,14 +19,11 @@ type recordingConsumer struct {
 	emptyTimestamps []gocql.UUID
 }
 
-func (rc *recordingConsumer) CreateChangeConsumer(
-	ctx context.Context,
-	input CreateChangeConsumerInput,
-) (ChangeConsumer, error) {
+func (rc *recordingConsumer) CreateChangeConsumer(_ context.Context, _ scyllacdc.CreateChangeConsumerInput) (scyllacdc.ChangeConsumer, error) {
 	return rc, nil
 }
 
-func (rc *recordingConsumer) Consume(ctx context.Context, change Change) error {
+func (rc *recordingConsumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 	return nil
 }
 
@@ -49,7 +48,7 @@ func (rc *recordingConsumer) GetTimestamps() []gocql.UUID {
 func TestConsumerCallsEmptyCallback(t *testing.T) {
 	consumer := &recordingConsumer{mu: &sync.Mutex{}}
 
-	adv := AdvancedReaderConfig{
+	adv := scyllacdc.AdvancedReaderConfig{
 		ChangeAgeLimit:         -time.Millisecond,
 		PostNonEmptyQueryDelay: 100 * time.Millisecond,
 		PostEmptyQueryDelay:    100 * time.Millisecond,
@@ -72,7 +71,7 @@ func TestConsumerCallsEmptyCallback(t *testing.T) {
 
 	execQuery(t, session, "CREATE TABLE tbl (pk int PRIMARY KEY, v int) WITH cdc = {'enabled': true}")
 
-	cfg := &ReaderConfig{
+	cfg := &scyllacdc.ReaderConfig{
 		Session:               session,
 		ChangeConsumerFactory: consumer,
 		TableNames:            []string{keyspaceName + ".tbl"},
@@ -82,7 +81,7 @@ func TestConsumerCallsEmptyCallback(t *testing.T) {
 
 	startTime := time.Now()
 
-	reader, err := NewReader(context.Background(), cfg)
+	reader, err := scyllacdc.NewReader(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,13 +138,13 @@ func TestConsumerResumesWithTableBackedProgressReporter(t *testing.T) {
 
 	execQuery(t, session, "CREATE TABLE tbl (pk int PRIMARY KEY, v int) WITH cdc = {'enabled': true}")
 
-	runWithProgressReporter := func(consumerFactory ChangeConsumerFactory, endTime time.Time, adv AdvancedReaderConfig) {
-		progressManager, err := NewTableBackedProgressManager(session, "progress", "test")
+	runWithProgressReporter := func(consumerFactory scyllacdc.ChangeConsumerFactory, endTime time.Time, adv scyllacdc.AdvancedReaderConfig) {
+		progressManager, err := scyllacdc.NewTableBackedProgressManager(session, "progress", "test")
 		if err != nil {
 			t.Fatalf("failed to create progress manager: %v", err)
 		}
 
-		cfg := &ReaderConfig{
+		cfg := &scyllacdc.ReaderConfig{
 			Session:               session,
 			ChangeConsumerFactory: consumerFactory,
 			TableNames:            []string{keyspaceName + ".tbl"},
@@ -154,7 +153,7 @@ func TestConsumerResumesWithTableBackedProgressReporter(t *testing.T) {
 			Logger:                log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
 		}
 
-		reader, err := NewReader(context.Background(), cfg)
+		reader, err := scyllacdc.NewReader(context.Background(), cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -172,7 +171,7 @@ func TestConsumerResumesWithTableBackedProgressReporter(t *testing.T) {
 
 	startTime := time.Now()
 
-	adv := AdvancedReaderConfig{
+	adv := scyllacdc.AdvancedReaderConfig{
 		PostNonEmptyQueryDelay: 100 * time.Millisecond,
 		PostEmptyQueryDelay:    100 * time.Millisecond,
 		PostFailedQueryDelay:   100 * time.Millisecond,
@@ -239,18 +238,18 @@ func TestConsumerHonorsTableTTL(t *testing.T) {
 	startTime := time.Now()
 	endTime := startTime.Add(2 * time.Second)
 
-	adv := AdvancedReaderConfig{
+	adv := scyllacdc.AdvancedReaderConfig{
 		PostNonEmptyQueryDelay: 100 * time.Millisecond,
 		PostEmptyQueryDelay:    100 * time.Millisecond,
 		PostFailedQueryDelay:   100 * time.Millisecond,
 		QueryTimeWindowSize:    500 * time.Millisecond,
 		ConfidenceWindowSize:   time.Millisecond,
-		ChangeAgeLimit:         time.Minute, // should be overriden by the TTL
+		ChangeAgeLimit:         time.Minute, // should be overridden by the TTL
 	}
 
 	consumer := &recordingConsumer{mu: &sync.Mutex{}}
 
-	cfg := &ReaderConfig{
+	cfg := &scyllacdc.ReaderConfig{
 		Session:               session,
 		ChangeConsumerFactory: consumer,
 		TableNames:            []string{keyspaceName + ".tbl"},
@@ -258,7 +257,7 @@ func TestConsumerHonorsTableTTL(t *testing.T) {
 		Logger:                log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
 	}
 
-	reader, err := NewReader(context.Background(), cfg)
+	reader, err := scyllacdc.NewReader(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

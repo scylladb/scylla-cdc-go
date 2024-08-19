@@ -142,15 +142,15 @@ func (noProgressManager) SaveProgress(ctx context.Context, gen time.Time, table 
 //
 // The schema is as follows:
 //
-//  CREATE TABLE IF NOT EXISTS <table name> (
-//      generation timestamp,
-//      application_name text,
-//      table_name text,
-//      stream_id blob,
-//      last_timestamp timeuuid,
-//      current_generation timestamp,
-//      PRIMARY KEY ((generation, application_name, table_name, stream_id))
-//  )
+//	CREATE TABLE IF NOT EXISTS <table name> (
+//	    generation timestamp,
+//	    application_name text,
+//	    table_name text,
+//	    stream_id blob,
+//	    last_timestamp timeuuid,
+//	    current_generation timestamp,
+//	    PRIMARY KEY ((generation, application_name, table_name, stream_id))
+//	)
 //
 // Progress for each stream is stored in a separate row, indexed by generation,
 // application_name, table_name and stream_id.
@@ -171,7 +171,7 @@ type TableBackedProgressManager struct {
 }
 
 // NewTableBackedProgressManager creates a new TableBackedProgressManager.
-func NewTableBackedProgressManager(session *gocql.Session, progressTableName string, applicationName string) (*TableBackedProgressManager, error) {
+func NewTableBackedProgressManager(session *gocql.Session, progressTableName, applicationName string) (*TableBackedProgressManager, error) {
 	tbpm := &TableBackedProgressManager{
 		session:           session,
 		progressTableName: progressTableName,
@@ -240,11 +240,14 @@ func (tbpm *TableBackedProgressManager) StartGeneration(ctx context.Context, gen
 
 // GetProgress is needed to implement the ProgressManager interface.
 func (tbpm *TableBackedProgressManager) GetProgress(ctx context.Context, gen time.Time, tableName string, streamID StreamID) (Progress, error) {
-	tbpm.concurrentQueryLimiter.Acquire(ctx, 1)
+	err := tbpm.concurrentQueryLimiter.Acquire(ctx, 1)
+	if err != nil {
+		return Progress{}, err
+	}
 	defer tbpm.concurrentQueryLimiter.Release(1)
 
 	var timestamp gocql.UUID
-	err := tbpm.session.Query(
+	err = tbpm.session.Query(
 		fmt.Sprintf("SELECT last_timestamp FROM %s WHERE generation = ? AND application_name = ? AND table_name = ? AND stream_id = ?", tbpm.progressTableName),
 		gen, tbpm.applicationName, tableName, streamID,
 	).Scan(&timestamp)
@@ -257,7 +260,10 @@ func (tbpm *TableBackedProgressManager) GetProgress(ctx context.Context, gen tim
 
 // SaveProgress is needed to implement the ProgressManager interface.
 func (tbpm *TableBackedProgressManager) SaveProgress(ctx context.Context, gen time.Time, tableName string, streamID StreamID, progress Progress) error {
-	tbpm.concurrentQueryLimiter.Acquire(ctx, 1)
+	err := tbpm.concurrentQueryLimiter.Acquire(ctx, 1)
+	if err != nil {
+		return err
+	}
 	defer tbpm.concurrentQueryLimiter.Release(1)
 
 	return tbpm.session.Query(
@@ -294,5 +300,7 @@ func (tbpm *TableBackedProgressManager) GetApplicationReadStartTime(ctx context.
 	return timestamp.Time(), nil
 }
 
-var _ ProgressManager = (*TableBackedProgressManager)(nil)
-var _ ProgressManagerWithStartTime = (*TableBackedProgressManager)(nil)
+var (
+	_ ProgressManager              = (*TableBackedProgressManager)(nil)
+	_ ProgressManagerWithStartTime = (*TableBackedProgressManager)(nil)
+)

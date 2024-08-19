@@ -1,4 +1,4 @@
-package scyllacdc
+package scyllacdc_test
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+
+	scyllacdc "github.com/scylladb/scylla-cdc-go"
 	"github.com/scylladb/scylla-cdc-go/internal/testutils"
 )
 
@@ -42,19 +44,19 @@ var typesTestCases = []struct {
 			"DELETE v3 FROM %s WHERE pk = 1 AND ck = 4",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v1": scalarOverwrite{ptrTo(int(3))}},
-			{"cdc$operation": OperationType(Update), "v1": scalarOverwrite{ptrTo(int(7))}},
-			{"cdc$operation": OperationType(Update), "v1": scalarErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v1": scalarOverwrite{ptrTo(int(3))}},
+			{"cdc$operation": scyllacdc.Update, "v1": scalarOverwrite{ptrTo(int(7))}},
+			{"cdc$operation": scyllacdc.Update, "v1": scalarErase{}},
 
-			{"cdc$operation": OperationType(Insert), "v2": scalarOverwrite{ptrTo("abc")}},
-			{"cdc$operation": OperationType(Update), "v2": scalarOverwrite{ptrTo("def")}},
-			{"cdc$operation": OperationType(Update), "v2": scalarOverwrite{ptrTo("")}},
-			{"cdc$operation": OperationType(Update), "v2": scalarErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v2": scalarOverwrite{ptrTo("abc")}},
+			{"cdc$operation": scyllacdc.Update, "v2": scalarOverwrite{ptrTo("def")}},
+			{"cdc$operation": scyllacdc.Update, "v2": scalarOverwrite{ptrTo("")}},
+			{"cdc$operation": scyllacdc.Update, "v2": scalarErase{}},
 
-			{"cdc$operation": OperationType(Insert), "v3": scalarOverwrite{[]byte{0x12, 0x34}}},
-			{"cdc$operation": OperationType(Update), "v3": scalarOverwrite{[]byte{0x43, 0x21}}},
-			{"cdc$operation": OperationType(Update), "v3": scalarOverwrite{make([]byte, 0)}},
-			{"cdc$operation": OperationType(Update), "v3": scalarErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v3": scalarOverwrite{[]byte{0x12, 0x34}}},
+			{"cdc$operation": scyllacdc.Update, "v3": scalarOverwrite{[]byte{0x43, 0x21}}},
+			{"cdc$operation": scyllacdc.Update, "v3": scalarOverwrite{make([]byte, 0)}},
+			{"cdc$operation": scyllacdc.Update, "v3": scalarErase{}},
 		},
 	},
 	{
@@ -69,14 +71,15 @@ var typesTestCases = []struct {
 			"DELETE v FROM %s WHERE pk = 1 AND ck = 1",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v": listOverwrite{[]int{1, 2, 3}}},
-			{"cdc$operation": OperationType(Update), "v": listOverwrite{[]int{4, 5, 6}}},
-			{"cdc$operation": OperationType(Update), "v": listAddition{[]int{7, 8, 9}}},
-			{"cdc$operation": OperationType(Update), "v": listAddition{[]int{-2, -1, 0}}},
-			{"cdc$operation": OperationType(Update), "v": listRemoval{4}},
-			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v": listOverwrite{[]int{1, 2, 3}}},
+			{"cdc$operation": scyllacdc.Update, "v": listOverwrite{[]int{4, 5, 6}}},
+			{"cdc$operation": scyllacdc.Update, "v": listAddition{[]int{7, 8, 9}}},
+			{"cdc$operation": scyllacdc.Update, "v": listAddition{[]int{-2, -1, 0}}},
+			{"cdc$operation": scyllacdc.Update, "v": listRemoval{4}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionErase{}},
 		},
-	}, {
+	},
+	{
 		"types_lists_with_tuples",
 		"CREATE TABLE %s (pk int, ck int, v list<frozen<tuple<int, text>>>, PRIMARY KEY (pk, ck))",
 		[]string{
@@ -88,12 +91,12 @@ var typesTestCases = []struct {
 			"DELETE v FROM %s WHERE pk = 1 AND ck = 1",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v": listOverwrite{[][]interface{}{{ptrTo(1), ptrTo("abc")}, {ptrTo(2), ptrTo("def")}}}},
-			{"cdc$operation": OperationType(Update), "v": listOverwrite{[][]interface{}{{(*int)(nil), ptrTo("ghi")}, {ptrTo(4), (*string)(nil)}}}},
-			{"cdc$operation": OperationType(Update), "v": listAddition{[][]interface{}{{ptrTo(5), ptrTo("mno")}}}},
-			{"cdc$operation": OperationType(Update), "v": listAddition{[][]interface{}{{ptrTo(6), ptrTo("pqr")}}}},
-			{"cdc$operation": OperationType(Update), "v": listRemoval{2}},
-			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v": listOverwrite{[][]interface{}{{ptrTo(1), ptrTo("abc")}, {ptrTo(2), ptrTo("def")}}}},
+			{"cdc$operation": scyllacdc.Update, "v": listOverwrite{[][]interface{}{{(*int)(nil), ptrTo("ghi")}, {ptrTo(4), (*string)(nil)}}}},
+			{"cdc$operation": scyllacdc.Update, "v": listAddition{[][]interface{}{{ptrTo(5), ptrTo("mno")}}}},
+			{"cdc$operation": scyllacdc.Update, "v": listAddition{[][]interface{}{{ptrTo(6), ptrTo("pqr")}}}},
+			{"cdc$operation": scyllacdc.Update, "v": listRemoval{2}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionErase{}},
 		},
 	},
 	{
@@ -107,11 +110,11 @@ var typesTestCases = []struct {
 			"DELETE v FROM %s WHERE pk = 1 AND ck = 1",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[int]string{1: "abc", 2: "def"}}},
-			{"cdc$operation": OperationType(Update), "v": collectionOverwrite{map[int]string{3: "ghi", 4: "jkl"}}},
-			{"cdc$operation": OperationType(Update), "v": collectionAddition{map[int]string{5: "mno", 6: "pqr"}}},
-			{"cdc$operation": OperationType(Update), "v": collectionRemoval{[]int{4, 5}}},
-			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{map[int]string{1: "abc", 2: "def"}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionOverwrite{map[int]string{3: "ghi", 4: "jkl"}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionAddition{map[int]string{5: "mno", 6: "pqr"}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionRemoval{[]int{4, 5}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionErase{}},
 		},
 	},
 	{
@@ -125,11 +128,11 @@ var typesTestCases = []struct {
 			"DELETE v FROM %s WHERE pk = 1 AND ck = 1",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{[]int{1, 2}}},
-			{"cdc$operation": OperationType(Update), "v": collectionOverwrite{[]int{3, 4}}},
-			{"cdc$operation": OperationType(Update), "v": collectionAddition{[]int{5, 6}}},
-			{"cdc$operation": OperationType(Update), "v": collectionRemoval{[]int{4, 5}}},
-			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{[]int{1, 2}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionOverwrite{[]int{3, 4}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionAddition{[]int{5, 6}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionRemoval{[]int{4, 5}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionErase{}},
 		},
 	},
 	{
@@ -143,11 +146,11 @@ var typesTestCases = []struct {
 			"DELETE v FROM %s WHERE pk = 1 AND ck = 1",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{[]map[string]interface{}{{"a": ptrTo(1), "b": ptrTo("abc")}, {"a": ptrTo(2), "b": ptrTo("def")}}}},
-			{"cdc$operation": OperationType(Update), "v": collectionOverwrite{[]map[string]interface{}{{"a": (*int)(nil), "b": ptrTo("ghi")}, {"a": ptrTo(4), "b": (*string)(nil)}}}},
-			{"cdc$operation": OperationType(Update), "v": collectionAddition{[]map[string]interface{}{{"a": ptrTo(5), "b": ptrTo("mno")}}}},
-			{"cdc$operation": OperationType(Update), "v": collectionRemoval{[]map[string]interface{}{{"a": ptrTo(5), "b": ptrTo("mno")}}}},
-			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{[]map[string]interface{}{{"a": ptrTo(1), "b": ptrTo("abc")}, {"a": ptrTo(2), "b": ptrTo("def")}}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionOverwrite{[]map[string]interface{}{{"a": (*int)(nil), "b": ptrTo("ghi")}, {"a": ptrTo(4), "b": (*string)(nil)}}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionAddition{[]map[string]interface{}{{"a": ptrTo(5), "b": ptrTo("mno")}}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionRemoval{[]map[string]interface{}{{"a": ptrTo(5), "b": ptrTo("mno")}}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionErase{}},
 		},
 	},
 	{
@@ -168,18 +171,18 @@ var typesTestCases = []struct {
 			"UPDATE %s SET v = null WHERE pk = 1 AND ck = 1",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v": scalarOverwrite{[]interface{}{ptrTo(2), ptrTo("abc")}}},
-			{"cdc$operation": OperationType(Insert), "v": scalarOverwrite{[]interface{}{ptrTo(2), (*string)(nil)}}},
-			{"cdc$operation": OperationType(Insert), "v": scalarOverwrite{[]interface{}{(*int)(nil), ptrTo("abc")}}},
-			{"cdc$operation": OperationType(Insert), "v": scalarOverwrite{[]interface{}{(*int)(nil), (*string)(nil)}}},
-			{"cdc$operation": OperationType(Insert), "v": scalarErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v": scalarOverwrite{[]interface{}{ptrTo(2), ptrTo("abc")}}},
+			{"cdc$operation": scyllacdc.Insert, "v": scalarOverwrite{[]interface{}{ptrTo(2), (*string)(nil)}}},
+			{"cdc$operation": scyllacdc.Insert, "v": scalarOverwrite{[]interface{}{(*int)(nil), ptrTo("abc")}}},
+			{"cdc$operation": scyllacdc.Insert, "v": scalarOverwrite{[]interface{}{(*int)(nil), (*string)(nil)}}},
+			{"cdc$operation": scyllacdc.Insert, "v": scalarErase{}},
 
-			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{ptrTo(2), ptrTo("abc")}}},
-			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{ptrTo(2), (*string)(nil)}}},
-			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{(*int)(nil), ptrTo("abc")}}},
-			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{(*int)(nil), ptrTo("")}}},
-			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{(*int)(nil), (*string)(nil)}}},
-			{"cdc$operation": OperationType(Update), "v": scalarErase{}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarOverwrite{[]interface{}{ptrTo(2), ptrTo("abc")}}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarOverwrite{[]interface{}{ptrTo(2), (*string)(nil)}}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarOverwrite{[]interface{}{(*int)(nil), ptrTo("abc")}}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarOverwrite{[]interface{}{(*int)(nil), ptrTo("")}}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarOverwrite{[]interface{}{(*int)(nil), (*string)(nil)}}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarErase{}},
 		},
 	},
 	{
@@ -195,13 +198,13 @@ var typesTestCases = []struct {
 			"UPDATE %s SET v = (null, 444) WHERE pk = 1 AND ck = 1",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(1), ptrTo("abc")}, ptrTo(7)}}},
+			{"cdc$operation": scyllacdc.Insert, "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(1), ptrTo("abc")}, ptrTo(7)}}},
 
-			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(100), ptrTo("zyx")}, ptrTo(111)}}},
-			{"cdc$operation": OperationType(Update), "v": scalarErase{}},
-			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(200), (*string)(nil)}, ptrTo(999)}}},
-			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(300), ptrTo("")}, ptrTo(333)}}},
-			{"cdc$operation": OperationType(Update), "v": scalarOverwrite{[]interface{}{([]interface{})(nil), ptrTo(444)}}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(100), ptrTo("zyx")}, ptrTo(111)}}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarErase{}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(200), (*string)(nil)}, ptrTo(999)}}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarOverwrite{[]interface{}{[]interface{}{ptrTo(300), ptrTo("")}, ptrTo(333)}}},
+			{"cdc$operation": scyllacdc.Update, "v": scalarOverwrite{[]interface{}{([]interface{})(nil), ptrTo(444)}}},
 		},
 	},
 	{
@@ -226,22 +229,22 @@ var typesTestCases = []struct {
 			"UPDATE %s SET v.b = null WHERE pk = 1 AND ck = 1",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": ptrTo(2), "b": ptrTo("abc")}}},
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": ptrTo(2), "b": (*string)(nil)}}},
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": (*int)(nil), "b": ptrTo("abc")}}},
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": (*int)(nil), "b": (*string)(nil)}}},
-			{"cdc$operation": OperationType(Insert), "v": collectionErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{map[string]interface{}{"a": ptrTo(2), "b": ptrTo("abc")}}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{map[string]interface{}{"a": ptrTo(2), "b": (*string)(nil)}}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{map[string]interface{}{"a": (*int)(nil), "b": ptrTo("abc")}}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{map[string]interface{}{"a": (*int)(nil), "b": (*string)(nil)}}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionErase{}},
 
-			{"cdc$operation": OperationType(Update), "v": collectionOverwrite{map[string]interface{}{"a": ptrTo(2), "b": ptrTo("abc")}}},
-			{"cdc$operation": OperationType(Update), "v": collectionOverwrite{map[string]interface{}{"a": ptrTo(2), "b": (*string)(nil)}}},
-			{"cdc$operation": OperationType(Update), "v": collectionOverwrite{map[string]interface{}{"a": (*int)(nil), "b": ptrTo("abc")}}},
-			{"cdc$operation": OperationType(Update), "v": collectionOverwrite{map[string]interface{}{"a": (*int)(nil), "b": (*string)(nil)}}},
-			{"cdc$operation": OperationType(Update), "v": collectionErase{}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionOverwrite{map[string]interface{}{"a": ptrTo(2), "b": ptrTo("abc")}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionOverwrite{map[string]interface{}{"a": ptrTo(2), "b": (*string)(nil)}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionOverwrite{map[string]interface{}{"a": (*int)(nil), "b": ptrTo("abc")}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionOverwrite{map[string]interface{}{"a": (*int)(nil), "b": (*string)(nil)}}},
+			{"cdc$operation": scyllacdc.Update, "v": collectionErase{}},
 
-			{"cdc$operation": OperationType(Update), "v": udtSetFields{map[string]interface{}{"a": ptrTo(2), "b": (*string)(nil)}, []int16(nil)}},
-			{"cdc$operation": OperationType(Update), "v": udtSetFields{map[string]interface{}{"a": (*int)(nil), "b": (*string)(nil)}, []int16{0}}},
-			{"cdc$operation": OperationType(Update), "v": udtSetFields{map[string]interface{}{"a": (*int)(nil), "b": ptrTo("abc")}, []int16(nil)}},
-			{"cdc$operation": OperationType(Update), "v": udtSetFields{map[string]interface{}{"a": (*int)(nil), "b": (*string)(nil)}, []int16{1}}},
+			{"cdc$operation": scyllacdc.Update, "v": udtSetFields{map[string]interface{}{"a": ptrTo(2), "b": (*string)(nil)}, []int16(nil)}},
+			{"cdc$operation": scyllacdc.Update, "v": udtSetFields{map[string]interface{}{"a": (*int)(nil), "b": (*string)(nil)}, []int16{0}}},
+			{"cdc$operation": scyllacdc.Update, "v": udtSetFields{map[string]interface{}{"a": (*int)(nil), "b": ptrTo("abc")}, []int16(nil)}},
+			{"cdc$operation": scyllacdc.Update, "v": udtSetFields{map[string]interface{}{"a": (*int)(nil), "b": (*string)(nil)}, []int16{1}}},
 		},
 	},
 	{
@@ -255,11 +258,11 @@ var typesTestCases = []struct {
 			"INSERT INTO %s (pk, ck, v) VALUES (1, 1, null)",
 		},
 		[]change{
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": map[string]interface{}{"a": ptrTo(2), "b": ptrTo("abc")}, "b": ptrTo(3)}}},
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": map[string]interface{}{"a": (*int)(nil), "b": ptrTo("abc")}, "b": (*int)(nil)}}},
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": (map[string]interface{})(nil), "b": ptrTo(3)}}},
-			{"cdc$operation": OperationType(Insert), "v": collectionOverwrite{map[string]interface{}{"a": (map[string]interface{})(nil), "b": (*int)(nil)}}},
-			{"cdc$operation": OperationType(Insert), "v": collectionErase{}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{map[string]interface{}{"a": map[string]interface{}{"a": ptrTo(2), "b": ptrTo("abc")}, "b": ptrTo(3)}}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{map[string]interface{}{"a": map[string]interface{}{"a": (*int)(nil), "b": ptrTo("abc")}, "b": (*int)(nil)}}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{map[string]interface{}{"a": (map[string]interface{})(nil), "b": ptrTo(3)}}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionOverwrite{map[string]interface{}{"a": (map[string]interface{})(nil), "b": (*int)(nil)}}},
+			{"cdc$operation": scyllacdc.Insert, "v": collectionErase{}},
 		},
 	},
 }
@@ -272,10 +275,13 @@ type scalarErase struct{}
 type collectionOverwrite struct {
 	value interface{}
 }
-type collectionErase struct{}
-type collectionAddition struct {
-	values interface{}
-}
+type (
+	collectionErase    struct{}
+	collectionAddition struct {
+		values interface{}
+	}
+)
+
 type collectionRemoval struct {
 	values interface{}
 }
@@ -301,16 +307,16 @@ type notSet struct{}
 
 func TestTypes(t *testing.T) {
 	var rowsMu sync.Mutex
-	changeRows := make(map[string][]*ChangeRow)
+	changeRows := make(map[string][]*scyllacdc.ChangeRow)
 
-	factory := MakeChangeConsumerFactoryFromFunc(func(ctx context.Context, tableName string, c Change) error {
+	factory := scyllacdc.MakeChangeConsumerFactoryFromFunc(func(ctx context.Context, tableName string, c scyllacdc.Change) error {
 		rowsMu.Lock()
 		defer rowsMu.Unlock()
 		changeRows[tableName] = append(changeRows[tableName], c.Delta...)
 		return nil
 	})
 
-	adv := AdvancedReaderConfig{
+	adv := scyllacdc.AdvancedReaderConfig{
 		ChangeAgeLimit:         time.Minute,
 		PostNonEmptyQueryDelay: 3 * time.Second,
 		PostEmptyQueryDelay:    3 * time.Second,
@@ -349,7 +355,7 @@ func TestTypes(t *testing.T) {
 	}
 
 	// Configuration for the CDC reader
-	cfg := &ReaderConfig{
+	cfg := &scyllacdc.ReaderConfig{
 		Session:               session,
 		ChangeConsumerFactory: factory,
 		TableNames:            tableNames,
@@ -357,7 +363,7 @@ func TestTypes(t *testing.T) {
 		Logger:                log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
 	}
 
-	reader, err := NewReader(context.Background(), cfg)
+	reader, err := scyllacdc.NewReader(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +393,7 @@ func TestTypes(t *testing.T) {
 			expected := tc.expectedChanges[i]
 			for columnName, v := range expected {
 				if columnName == "cdc$operation" {
-					expectedOp := v.(OperationType)
+					expectedOp := v.(scyllacdc.OperationType)
 					if expectedOp != change.GetOperation() {
 						t.Errorf("%s[%d]: expected operation %s, got %s", tc.tableName, i, expectedOp, change.GetOperation())
 					}
@@ -539,7 +545,9 @@ func TestTypes(t *testing.T) {
 	}
 }
 
-func checkList(t *testing.T, tableName string, columnName string, rowNum int, actual interface{}, expected interface{}) {
+func checkList(t *testing.T, tableName, columnName string, rowNum int, actual, expected interface{}) {
+	t.Helper()
+
 	// Sort values by their timeuuid
 	type cell struct {
 		key   gocql.UUID
@@ -556,7 +564,7 @@ func checkList(t *testing.T, tableName string, columnName string, rowNum int, ac
 	}
 
 	sort.Slice(asList, func(i, j int) bool {
-		return compareTimeuuid(asList[i].key, asList[j].key) < 0
+		return scyllacdc.CompareTimeUUID(asList[i].key, asList[j].key) < 0
 	})
 
 	rExpected := reflect.ValueOf(expected)
@@ -573,6 +581,8 @@ func checkList(t *testing.T, tableName string, columnName string, rowNum int, ac
 }
 
 func execQuery(t *testing.T, session *gocql.Session, query string) {
+	t.Helper()
+
 	t.Logf("executing query %s", query)
 	err := session.Query(query).Exec()
 	if err != nil {
