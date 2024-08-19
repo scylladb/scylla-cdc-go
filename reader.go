@@ -23,7 +23,7 @@ type ReaderConfig struct {
 	TableNames []string
 
 	// Consistency to use when querying CDC log.
-	// If not specified, QUORUM consistency will be used.
+	// If not specified, LOCAL_QUORUM consistency will be used.
 	Consistency gocql.Consistency
 
 	// Creates ChangeProcessors, which process information fetched from the CDC log.
@@ -55,8 +55,8 @@ func (rc *ReaderConfig) validate() error {
 func (rc *ReaderConfig) setDefaults() {
 	if rc.Consistency == 0 {
 		// Consistency 0 is ANY. It doesn't make sense
-		// to use it for reading, so default to QUORUM instead
-		rc.Consistency = gocql.Quorum
+		// to use it for reading, so default to LOCAL_QUORUM instead
+		rc.Consistency = gocql.LocalQuorum
 	}
 	if rc.ProgressManager == nil {
 		rc.ProgressManager = noProgressManager{}
