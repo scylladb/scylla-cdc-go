@@ -1,0 +1,40 @@
+issues:
+  exclude-rules:
+    - path: examples/*
+      linters:
+        - forbidigo
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - gocritic
+    - gofumpt
+    - goheader
+    - goimports
+    - gosimple
+    - govet
+    - ineffassign
+    #- lll
+    - misspell
+    - predeclared
+    - staticcheck
+    - thelper
+    - tparallel
+    - typecheck
+    - unused
+    - forbidigo
+run:
+  allow-parallel-runners: true
+  modules-download-mode: readonly
+  tests: true
+  go: '1.14'
+linters-settings:
+  govet:
+    enable-all: true
+    disable:
+      - shadow
+      - fieldalignment
+  gofumpt:
+    extra-rules: true
+  goimports:
+    local-prefixes: github.com/scylladb/scylla-cdc-go

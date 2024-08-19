@@ -43,6 +43,31 @@ define dl_bin
 	chmod +x "$(GOBIN)/$(1)";
 endef
 
+define dl_tgz
+	@if [ ! -f "$(GOBIN)/$(1)" ]; then \
+		echo "Downloading $(GOBIN)/$(1)"; \
+		curl --progress-bar -L $(2) | tar zxf - --wildcards --strip 1 -C $(GOBIN) '*/$(1)'; \
+		chmod +x "$(GOBIN)/$(1)"; \
+	fi
+endef
+
+define dl_tgz
+	@[ -d "$(GOBIN)" ] || mkdir -p "$(GOBIN)"; \
+	if [ -L "$(GOBIN)/$(1)" ] && [ -e "$(GOBIN)/$(1)" ]; then \
+		echo "$(GOBIN)/$(1) is already installed."; \
+		return 0; \
+	fi; \
+	if $(GOBIN)/$(1) --version 2>/dev/null | grep "$(2)" >/dev/null; then \
+		echo "$(GOBIN)/$(1) is already installed."; \
+		return 0; \
+	fi; \
+	echo "$(GOBIN)/$(1) is not found, downloading."; \
+	rm -f "$(GOBIN)/$(1)" >/dev/null 2>&1  \
+	echo "Downloading $(GOBIN)/$(1)"; \
+	curl --progress-bar -L $(3) | tar zxf - --wildcards --strip 1 -C $(GOBIN) '*/$(1)'; \
+	chmod +x "$(GOBIN)/$(1)";
+endef
+
 .PHONY: tune-aio-max-nr
 tune-aio-max-nr:
 	@bash -c '[[ "2097152" -ge "$(cat /proc/sys/fs/aio-max-nr)" ]] && sudo sh -c "echo 2097152 >> /proc/sys/fs/aio-max-nr"'
@@ -74,6 +99,18 @@ else
 	@exit 69
 endif
 
+
+install-golangci-lint: GOLANGCI_VERSION = 1.60.1
+install-golangci-lint: Makefile
+ifeq ($(GOARCH),arm64)
+	$(call dl_tgz,golangci-lint,${GOLANGCI_VERSION},https://github.com/golangci/golangci-lint/releases/download/v$(GOLANGCI_VERSION)/golangci-lint-$(GOLANGCI_VERSION)-$(GOOS)-arm64.tar.gz)
+else ifeq ($(GOARCH),amd64)
+	$(call dl_tgz,golangci-lint,${GOLANGCI_VERSION},https://github.com/golangci/golangci-lint/releases/download/v$(GOLANGCI_VERSION)/golangci-lint-$(GOLANGCI_VERSION)-$(GOOS)-amd64.tar.gz)
+else
+	@printf 'Unknown architecture "%s"\n', "$(GOARCH)" \
+	@exit 69
+endif
+
 .PHONY: test
 test: install-docker-compose start-docker-environment
 	@echo "Running tests"
@@ -85,10 +122,12 @@ build:
 	@go build -v ./...
 
 .PHONY: lint
-lint:
-	@go vet -v ./...
+lint: install-golangci-lint
+	go list ./... | sed -e 's/github.com\/scylladb\/scylla-cdc-go/./g' | \
+		xargs $(GOBIN)/golangci-lint run --timeout=5m
 
 .PHONY: fix-lint
-fix-lint:
-	@go vet -v ./...
+fix-lint: install-golangci-lint
+	go list ./... | sed -e 's/github.com\/scylladb\/scylla-cdc-go/./g' | \
+		xargs $(GOBIN)/golangci-lint run --timeout=5m --fix
 
