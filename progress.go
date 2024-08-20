@@ -260,6 +260,7 @@ func (tbpm *TableBackedProgressManager) SaveProgress(ctx context.Context, gen ti
 	tbpm.concurrentQueryLimiter.Acquire(ctx, 1)
 	defer tbpm.concurrentQueryLimiter.Release(1)
 
+	//log.Printf("SaveProgress for %s = %s\n", streamID, progress.LastProcessedRecordTime)
 	return tbpm.session.Query(
 		fmt.Sprintf("INSERT INTO %s (generation, application_name, table_name, stream_id, last_timestamp) VALUES (?, ?, ?, ?, ?) USING TTL ?", tbpm.progressTableName),
 		gen, tbpm.applicationName, tableName, streamID, progress.LastProcessedRecordTime, tbpm.ttl,

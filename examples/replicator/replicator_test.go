@@ -374,12 +374,11 @@ func TestReplicator(t *testing.T) {
 	t.Log("running replicators")
 
 	adv := scyllacdc.AdvancedReaderConfig{
-		ChangeAgeLimit:         time.Minute,
-		PostNonEmptyQueryDelay: 3 * time.Second,
-		PostEmptyQueryDelay:    3 * time.Second,
-		PostFailedQueryDelay:   3 * time.Second,
-		QueryTimeWindowSize:    5 * time.Minute,
-		ConfidenceWindowSize:   time.Millisecond,
+		ChangeAgeLimit:       time.Minute,
+		PostQueryDelay:       3 * time.Second,
+		PostFailedQueryDelay: 3 * time.Second,
+		QueryTimeWindowSize:  5 * time.Minute,
+		ConfidenceWindowSize: time.Millisecond,
 	}
 
 	schemaNames := make([]string, 0)
