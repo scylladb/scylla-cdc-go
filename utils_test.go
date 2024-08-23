@@ -27,13 +27,14 @@ func TestTimeUUIDCompare(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			cmp := compareTimeuuid(u1, u2)
+			cmp := CompareTimeUUID(u1, u2)
 
-			if i < j && !(cmp < 0) {
+			switch {
+			case i < j && !(cmp < 0):
 				t.Errorf("expected %s to be smaller than %s", u1, u2)
-			} else if i == j && !(cmp == 0) {
+			case i == j && !(cmp == 0):
 				t.Errorf("expected %s to be equal to %s", u1, u2)
-			} else if i > j && !(cmp > 0) {
+			case i > j && !(cmp > 0):
 				t.Errorf("expected %s to be larger than %s", u1, u2)
 			}
 		}

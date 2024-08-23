@@ -6,4 +6,4 @@ type Logger interface {
 
 type noLogger struct{}
 
-func (noLogger) Printf(format string, v ...interface{}) {}
+func (noLogger) Printf(_ string, _ ...interface{}) {}

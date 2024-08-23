@@ -19,15 +19,15 @@ type OperationType int8
 
 const (
 	PreImage                  OperationType = 0
-	Update                                  = 1
-	Insert                                  = 2
-	RowDelete                               = 3
-	PartitionDelete                         = 4
-	RangeDeleteStartInclusive               = 5
-	RangeDeleteStartExclusive               = 6
-	RangeDeleteEndInclusive                 = 7
-	RangeDeleteEndExclusive                 = 8
-	PostImage                               = 9
+	Update                    OperationType = 1
+	Insert                    OperationType = 2
+	RowDelete                 OperationType = 3
+	PartitionDelete           OperationType = 4
+	RangeDeleteStartInclusive OperationType = 5
+	RangeDeleteStartExclusive OperationType = 6
+	RangeDeleteEndInclusive   OperationType = 7
+	RangeDeleteEndExclusive   OperationType = 8
+	PostImage                 OperationType = 9
 )
 
 // String is needed to implement the fmt.Stringer interface.
@@ -512,6 +512,7 @@ type changeConsumerFuncInstance struct {
 func (ccfi *changeConsumerFuncInstance) End() error {
 	return nil
 }
+
 func (ccfi *changeConsumerFuncInstance) Consume(ctx context.Context, change Change) error {
 	return ccfi.f(ctx, ccfi.tableName, change)
 }
@@ -609,7 +610,7 @@ func (crq *changeRowQuerier) queryRange(start, end gocql.UUID) (*changeRowIterat
 }
 
 // For a given range, returns the cdc$time of the earliest rows for each stream.
-func (crq *changeRowQuerier) findFirstRowsInRange(start, end gocql.UUID) (map[string]gocql.UUID, error) {
+func (crq *changeRowQuerier) findFirstRowsInRange(start, end gocql.UUID) (map[string]gocql.UUID, error) { // nolint:unused
 	queryStr := fmt.Sprintf(
 		"SELECT \"cdc$stream_id\", \"cdc$time\" FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" <= ? PER PARTITION LIMIT 1 BYPASS CACHE",
 		crq.keyspaceName,
@@ -644,46 +645,46 @@ func (crq *changeRowQuerier) findFirstRowsInRange(start, end gocql.UUID) (map[st
 //
 // Gocql has two main methods of retrieving row data:
 //
-// - If you know what columns will be returned by the query and which types
-//   to use to represent them, you use (*Iter).Scan(...) function and pass
-//   a list of pointers to values of types you chose for the representation.
-//   For example, if `x` is int, `Scan(&x)` will put the value of the column
-//   directly to the `x` variable, setting it to 0 if the column was null.
-// - If you don't know which columns will be returned and what are their
-//   types, you can use (*Iter).MapScan, which returns a map from column
-//   name to the column value. Gocql automatically chooses a type which
-//   will be used to represent the column value.
+//   - If you know what columns will be returned by the query and which types
+//     to use to represent them, you use (*Iter).Scan(...) function and pass
+//     a list of pointers to values of types you chose for the representation.
+//     For example, if `x` is int, `Scan(&x)` will put the value of the column
+//     directly to the `x` variable, setting it to 0 if the column was null.
+//   - If you don't know which columns will be returned and what are their
+//     types, you can use (*Iter).MapScan, which returns a map from column
+//     name to the column value. Gocql automatically chooses a type which
+//     will be used to represent the column value.
 //
 // In our interface, we would like to use an API like MapScan, but there
 // are some problems which are addressed by changeRowIterator:
 //
-// - Gocql's choice of the type used to represent column values is not the best
-//   for CDC use case. First and foremost, it's very important to differentiate
-//   Go's default value for a type from a null. For example, for int columns,
-//   MapScan chooses Go's int type, and sets it to 0 in both cases if it was 0
-//   or null in the table. For CDC, this means completely different things -
-//   0 would mean that the 0 value was written to that column, while null would
-//   mean that this column value was not changed.
-//   Fortunately, we can solve this issue by using a pointer-to-type (e.g. *int).
-//   Gocql will set it to null if it was null in the database, and set it
-//   to a pointer to a proper value if it was not null.
+//   - Gocql's choice of the type used to represent column values is not the best
+//     for CDC use case. First and foremost, it's very important to differentiate
+//     Go's default value for a type from a null. For example, for int columns,
+//     MapScan chooses Go's int type, and sets it to 0 in both cases if it was 0
+//     or null in the table. For CDC, this means completely different things -
+//     0 would mean that the 0 value was written to that column, while null would
+//     mean that this column value was not changed.
+//     Fortunately, we can solve this issue by using a pointer-to-type (e.g. *int).
+//     Gocql will set it to null if it was null in the database, and set it
+//     to a pointer to a proper value if it was not null.
 //
-// - Similarly to above, UDTs suffer from a similar problem - they are,
-//   by default, represented by a map[string]interface{} which holds non-pointer
-//   values of UDT's elements. Fortunately, we can provide a custom type
-//   which uses pointers to UDT's elements - see udtWithNulls.
+//   - Similarly to above, UDTs suffer from a similar problem - they are,
+//     by default, represented by a map[string]interface{} which holds non-pointer
+//     values of UDT's elements. Fortunately, we can provide a custom type
+//     which uses pointers to UDT's elements - see udtWithNulls.
 //
-// - Tuples are handled in a peculiar way - instead of returning, for example,
-//   an []interface{} which holds tuple values, Scan expects that a pointer
-//   for each tuple element will be provided, and MapScan puts each tuple
-//   element under a separate key in the map. This creates a problem - it's
-//   impossible to differentiate a tuple with all fields set to null, and
-//   a tuple that is just a null. In CDC, the first means an overwrite of the
-//   column, and the second means that the column should not be changed.
-//   This is worked around by using the writetime(X) function on the tuple
-//   column - this function returns null iff column X was null.
-//   Moreover, tuples are represented as an []interface{} slice containing
-//   pointers to tuple elements.
+//   - Tuples are handled in a peculiar way - instead of returning, for example,
+//     an []interface{} which holds tuple values, Scan expects that a pointer
+//     for each tuple element will be provided, and MapScan puts each tuple
+//     element under a separate key in the map. This creates a problem - it's
+//     impossible to differentiate a tuple with all fields set to null, and
+//     a tuple that is just a null. In CDC, the first means an overwrite of the
+//     column, and the second means that the column should not be changed.
+//     This is worked around by using the writetime(X) function on the tuple
+//     column - this function returns null iff column X was null.
+//     Moreover, tuples are represented as an []interface{} slice containing
+//     pointers to tuple elements.
 type changeRowIterator struct {
 	iter         *gocql.Iter
 	columnValues []interface{}

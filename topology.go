@@ -190,7 +190,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 	// Fetch some generation times
 	times, err := gf.source.getGenerationTimes(consistency)
 	if err != nil {
-		gf.logger.Printf("an error occured while fetching generation times: %s", err)
+		gf.logger.Printf("an error occurred while fetching generation times: %s", err)
 		return
 	}
 	sort.Sort(timeList(times))
@@ -198,7 +198,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 	fetchAndPush := func(t time.Time) (shouldBreak bool) {
 		streams, err := gf.source.getGeneration(t, consistency)
 		if err != nil {
-			gf.logger.Printf("an error occured while fetching generation streams for %s: %s", t, err)
+			gf.logger.Printf("an error occurred while fetching generation streams for %s: %s", t, err)
 			return true
 		}
 		gen := &generation{t, streams}

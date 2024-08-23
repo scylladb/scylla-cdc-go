@@ -98,7 +98,7 @@ outer:
 
 		windowProcessingStartTime := time.Now()
 
-		if compareTimeuuid(wnd.begin, wnd.end) < 0 {
+		if CompareTimeUUID(wnd.begin, wnd.end) < 0 {
 			var iter *changeRowIterator
 			iter, err = crq.queryRange(wnd.begin, wnd.end)
 			if err != nil {
@@ -132,11 +132,12 @@ outer:
 		wnd = sbr.getPollWindow()
 
 		var delay time.Duration
-		if err != nil {
+		switch {
+		case err != nil:
 			delay = sbr.config.Advanced.PostFailedQueryDelay
-		} else if hadRows {
+		case hadRows:
 			delay = sbr.config.Advanced.PostNonEmptyQueryDelay
-		} else {
+		default:
 			delay = sbr.config.Advanced.PostEmptyQueryDelay
 		}
 
@@ -175,7 +176,7 @@ func (sbr *streamBatchReader) loadProgressForStreams(ctx context.Context) error 
 		if err != nil {
 			return err
 		}
-		if compareTimeuuid(sbr.lastTimestamp, progress.LastProcessedRecordTime) < 0 {
+		if CompareTimeUUID(sbr.lastTimestamp, progress.LastProcessedRecordTime) < 0 {
 			sbr.config.Logger.Printf("loaded progress for stream %s: %s (%s)\n", stream, progress.LastProcessedRecordTime, progress.LastProcessedRecordTime.Time())
 			sbr.perStreamProgress[string(stream)] = progress.LastProcessedRecordTime
 		} else {
@@ -188,7 +189,7 @@ func (sbr *streamBatchReader) loadProgressForStreams(ctx context.Context) error 
 
 func (sbr *streamBatchReader) advanceAllStreamsTo(point gocql.UUID) {
 	for id := range sbr.perStreamProgress {
-		if compareTimeuuid(sbr.perStreamProgress[id], point) < 0 {
+		if CompareTimeUUID(sbr.perStreamProgress[id], point) < 0 {
 			sbr.perStreamProgress[id] = point
 		}
 	}
@@ -228,7 +229,7 @@ func (sbr *streamBatchReader) getPollWindowStart() gocql.UUID {
 	first := true
 	var windowStart gocql.UUID
 	for _, progress := range sbr.perStreamProgress {
-		if first || compareTimeuuid(windowStart, progress) > 0 {
+		if first || CompareTimeUUID(windowStart, progress) > 0 {
 			windowStart = progress
 		}
 		first = false
@@ -249,11 +250,12 @@ func (sbr *streamBatchReader) processRows(ctx context.Context, iter *changeRowIt
 		if c == nil {
 			break
 		}
-		if c.GetOperation() == PreImage {
+		switch c.GetOperation() {
+		case PreImage:
 			change.PreImage = append(change.PreImage, c)
-		} else if c.GetOperation() == PostImage {
+		case PostImage:
 			change.PostImage = append(change.PostImage, c)
-		} else {
+		default:
 			change.Delta = append(change.Delta, c)
 		}
 
@@ -263,7 +265,7 @@ func (sbr *streamBatchReader) processRows(ctx context.Context, iter *changeRowIt
 			// Since we are reading in batches and we started from the lowest progress mark
 			// of all streams in the batch, we might have to manually filter out changes
 			// from streams that had a save point later than the earliest progress mark
-			if compareTimeuuid(sbr.perStreamProgress[string(changeBatchCols.streamID)], changeBatchCols.time) < 0 {
+			if CompareTimeUUID(sbr.perStreamProgress[string(changeBatchCols.streamID)], changeBatchCols.time) < 0 {
 				change.StreamID = changeBatchCols.streamID
 				change.Time = changeBatchCols.time
 				consumer := sbr.consumers[string(changeBatchCols.streamID)]
@@ -292,7 +294,7 @@ func (sbr *streamBatchReader) getBaseTableName() string {
 
 func (sbr *streamBatchReader) reachedEndOfTheGeneration(windowEnd gocql.UUID) bool {
 	end, isClosed := sbr.endTimestamp.Load().(gocql.UUID)
-	return isClosed && (end == gocql.UUID{} || compareTimeuuid(end, windowEnd) <= 0)
+	return isClosed && (end == gocql.UUID{} || CompareTimeUUID(end, windowEnd) <= 0)
 }
 
 // Only one of `close`, `stopNow` methods should be called, only once

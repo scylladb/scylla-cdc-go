@@ -128,7 +128,7 @@ func (ppr *PeriodicProgressReporter) SaveAndStop(ctx context.Context) error {
 	return err
 }
 
-func compareTimeuuid(u1 gocql.UUID, u2 gocql.UUID) int {
+func CompareTimeUUID(u1, u2 gocql.UUID) int {
 	// Compare timestamps
 	t1 := u1.Timestamp()
 	t2 := u2.Timestamp()
