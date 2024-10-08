@@ -30,11 +30,11 @@ define dl_bin
 	@[ -d "$(GOBIN)" ] || mkdir -p "$(GOBIN)"; \
 	if [ -L "$(GOBIN)/$(1)" ] && [ -e "$(GOBIN)/$(1)" ]; then \
 		echo "$(GOBIN)/$(1) is already installed."; \
-		return 0; \
+		exit 0; \
 	fi; \
 	if $(GOBIN)/$(1) --version 2>/dev/null | grep "$(2)" >/dev/null; then \
 		echo "$(GOBIN)/$(1) is already installed."; \
-		return 0; \
+		exit 0; \
 	fi; \
 	echo "$(GOBIN)/$(1) is not found, downloading."; \
 	rm -f "$(GOBIN)/$(1)" >/dev/null 2>&1  \
@@ -55,11 +55,11 @@ define dl_tgz
 	@[ -d "$(GOBIN)" ] || mkdir -p "$(GOBIN)"; \
 	if [ -L "$(GOBIN)/$(1)" ] && [ -e "$(GOBIN)/$(1)" ]; then \
 		echo "$(GOBIN)/$(1) is already installed."; \
-		return 0; \
+		exit 0; \
 	fi; \
 	if $(GOBIN)/$(1) --version 2>/dev/null | grep "$(2)" >/dev/null; then \
 		echo "$(GOBIN)/$(1) is already installed."; \
-		return 0; \
+		exit 0; \
 	fi; \
 	echo "$(GOBIN)/$(1) is not found, downloading."; \
 	rm -f "$(GOBIN)/$(1)" >/dev/null 2>&1  \
