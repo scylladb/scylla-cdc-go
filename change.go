@@ -915,7 +915,11 @@ func (wnu *withNullUnmarshaler) UnmarshalCQL(info gocql.TypeInfo, data []byte) e
 
 	case gocql.TypeList, gocql.TypeSet:
 		if data == nil {
-			wnu.value = reflect.ValueOf(info.New()).Elem().Interface()
+			val, err := info.NewWithError()
+			if err != nil {
+				return fmt.Errorf("cannot create new instance of %s: %w", info, err)
+			}
+			wnu.value = reflect.ValueOf(val).Elem().Interface()
 			return nil
 		}
 
@@ -925,7 +929,11 @@ func (wnu *withNullUnmarshaler) UnmarshalCQL(info gocql.TypeInfo, data []byte) e
 			return err
 		}
 
-		lV := reflect.ValueOf(info.New()).Elem()
+		val, err := info.NewWithError()
+		if err != nil {
+			return fmt.Errorf("cannot create new instance of %s: %w", info, err)
+		}
+		lV := reflect.ValueOf(val).Elem()
 		for _, wnm := range lWnm {
 			lV.Set(reflect.Append(lV, reflect.ValueOf(wnm.derefForListOrMap())))
 		}
@@ -934,13 +942,22 @@ func (wnu *withNullUnmarshaler) UnmarshalCQL(info gocql.TypeInfo, data []byte) e
 
 	case gocql.TypeMap:
 		if data == nil {
-			wnu.value = reflect.ValueOf(info.New()).Elem().Interface()
+			val, err := info.NewWithError()
+			if err != nil {
+				return fmt.Errorf("cannot create new instance of %s: %w", info, err)
+			}
+			wnu.value = reflect.ValueOf(val).Elem().Interface()
 			return nil
 		}
 
 		// Make a map with withNullMarshallers
 		mapInfo := info.(gocql.CollectionType)
-		keyType := reflect.TypeOf(mapInfo.Key.New()).Elem()
+
+		keyVal, err := mapInfo.Key.NewWithError()
+		if err != nil {
+			return fmt.Errorf("cannot create new instance of %s: %w", mapInfo.Key, err)
+		}
+		keyType := reflect.TypeOf(keyVal).Elem()
 		mapWithWnuType := reflect.MapOf(keyType, reflect.TypeOf(withNullUnmarshaler{}))
 		mapWithWnuPtr := reflect.New(mapWithWnuType)
 		mapWithWnuPtr.Elem().Set(reflect.MakeMap(mapWithWnuType))
@@ -948,7 +965,11 @@ func (wnu *withNullUnmarshaler) UnmarshalCQL(info gocql.TypeInfo, data []byte) e
 			return err
 		}
 
-		resultMapType := reflect.TypeOf(info.New()).Elem()
+		mapVal, err := info.NewWithError()
+		if err != nil {
+			return fmt.Errorf("cannot create new instance of %s: %w", info, err)
+		}
+		resultMapType := reflect.TypeOf(mapVal).Elem()
 		resultMap := reflect.MakeMap(resultMapType)
 		iter := mapWithWnuPtr.Elem().MapRange()
 		for iter.Next() {
@@ -972,7 +993,11 @@ func (wnu *withNullUnmarshaler) UnmarshalCQL(info gocql.TypeInfo, data []byte) e
 		return nil
 
 	default:
-		vptr := reflect.New(reflect.TypeOf(info.New()))
+		val, err := info.NewWithError()
+		if err != nil {
+			return fmt.Errorf("cannot create new instance of %s: %w", info, err)
+		}
+		vptr := reflect.New(reflect.TypeOf(val))
 		if err := gocql.Unmarshal(info, data, vptr.Interface()); err != nil {
 			return err
 		}

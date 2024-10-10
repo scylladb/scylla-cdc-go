@@ -7,4 +7,4 @@ require (
 	golang.org/x/sync v0.8.0
 )
 
-replace github.com/gocql/gocql => github.com/scylladb/gocql v1.7.3
+replace github.com/gocql/gocql => github.com/scylladb/gocql v1.14.4
