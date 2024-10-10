@@ -301,7 +301,7 @@ func (sbr *streamBatchReader) reachedEndOfTheGeneration(windowEnd gocql.UUID) bo
 
 func (sbr *streamBatchReader) close(processUntil gocql.UUID) {
 	sbr.endTimestamp.Store(processUntil)
-	sbr.interruptCh <- struct{}{}
+	close(sbr.interruptCh)
 }
 
 func (sbr *streamBatchReader) stopNow() {
