@@ -340,6 +340,29 @@ func (c *ChangeRow) GetTTL() int64 {
 	return c.cdcCols.ttl
 }
 
+func (c *ChangeRow) GetSeqNo() int32 {
+	return c.cdcCols.batchSeqNo
+}
+
+func (c *ChangeRow) GetEndOfBatch() bool {
+	return c.cdcCols.endOfBatch
+}
+
+func (c *ChangeRow) GetRawData() []interface{} {
+	return c.data
+}
+
+func (c *ChangeRow) GetRawMapData() map[string]interface{} {
+	out := make(map[string]interface{}, len(c.data))
+	for k, v := range c.fieldNameToIdx {
+		if v >= len(c.data) {
+			continue
+		}
+		out[k] = c.data[v]
+	}
+	return out
+}
+
 // GetValue returns value that was assigned to this specific column.
 func (c *ChangeRow) GetValue(columnName string) (interface{}, bool) {
 	idx, ok := c.fieldNameToIdx[columnName]
