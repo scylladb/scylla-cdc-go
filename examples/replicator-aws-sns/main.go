@@ -16,6 +16,7 @@ import (
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 )
 
@@ -33,6 +34,10 @@ func main() {
 		readConsistency  string
 		writeConsistency string
 
+		snsTopic   string
+		snsRegion  string
+		snsSubject string
+
 		progressTable string
 	)
 
@@ -43,6 +48,11 @@ func main() {
 	flag.StringVar(&readConsistency, "read-consistency", "", "consistency level used to read from cdc log (one, quorum, all)")
 	flag.StringVar(&writeConsistency, "write-consistency", "", "consistency level used to write to the destination cluster (one, quorum, all)")
 	flag.StringVar(&progressTable, "progress-table", "", "fully-qualified name of the table in the destination cluster to use for saving progress; if omitted, the progress won't be saved")
+
+	flag.StringVar(&snsTopic, "sns-topic", "", "SNS Topic ARN")
+	flag.StringVar(&snsSubject, "sns-subject", "", "SNS Subject")
+	flag.StringVar(&snsRegion, "sns-region", "", "AWS region where SNS topic is deployed")
+
 	flag.String("mode", "", "mode (ignored)")
 	flag.Parse()
 
@@ -85,6 +95,7 @@ func main() {
 		context.Background(),
 		source, progressNode,
 		fullyQualifiedTables,
+		snsTopic, snsSubject, snsRegion,
 		&adv,
 		clRead,
 		clWrite,
@@ -158,6 +169,7 @@ func newReplicator(
 	ctx context.Context,
 	source, destination string,
 	tableNames []string,
+	topic, subject, region string,
 	advancedParams *scyllacdc.AdvancedReaderConfig,
 	readConsistency gocql.Consistency,
 	progressConsistency gocql.Consistency,
@@ -186,6 +198,9 @@ func newReplicator(
 
 	factory := &replicatorFactory{
 		rowsRead: rowsRead,
+		topic:    topic,
+		subject:  subject,
+		region:   region,
 		logger:   logger,
 	}
 
@@ -251,6 +266,9 @@ func (repl *replicator) GetReadRowsCount() int64 {
 
 type replicatorFactory struct {
 	rowsRead *int64
+	topic    string
+	subject  string
+	region   string
 	logger   scyllacdc.Logger
 }
 
@@ -262,7 +280,7 @@ func (rf *replicatorFactory) CreateChangeConsumer(
 	if len(splitTableName) < 2 {
 		return nil, fmt.Errorf("table name is not fully qualified: %s", input.TableName)
 	}
-	return NewSNSReplicator(ctx, rf.rowsRead, input.StreamID, input.ProgressReporter, rf.logger)
+	return NewSNSReplicator(ctx, rf.topic, rf.subject, rf.region, rf.rowsRead, input.StreamID, input.ProgressReporter, rf.logger)
 }
 
 type SNSReplicator struct {
@@ -290,12 +308,26 @@ type SNSReplicator struct {
 
 func NewSNSReplicator(
 	ctx context.Context,
+	topic, subject, region string,
 	count *int64,
 	streamID scyllacdc.StreamID,
 	reporter *scyllacdc.ProgressReporter,
 	logger scyllacdc.Logger,
 ) (*SNSReplicator, error) {
+	var opts [](func(*config.LoadOptions) error)
+	if region != "" {
+		opts = append(opts, config.WithRegion(region))
+	}
+
+	awsCfg, err := config.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+
 	dr := &SNSReplicator{
+		snsClient:  sns.NewFromConfig(awsCfg),
+		snsTopic:   topic,
+		snsSubject: subject,
 		totalCount: count,
 		streamID:   streamID,
 		reporter:   scyllacdc.NewPeriodicProgressReporter(logger, reportPeriod, reporter),
@@ -307,42 +339,60 @@ func NewSNSReplicator(
 
 func (r *SNSReplicator) Consume(ctx context.Context, c scyllacdc.Change) error {
 	timestamp := c.GetCassandraTimestamp()
-	pos := 0
-
 	if showTimestamps {
 		log.Printf("[%s] Processing timestamp: %s (%s)\n", c.StreamID, c.Time, c.Time.Time())
 	}
 
-	for pos < len(c.Delta) {
-		change := c.Delta[pos]
-		change.GetRawData()
-		change.GetOperation()
-
-		msg, err := json.Marshal(map[string]interface{}{
-			"timestamp":    timestamp,
-			"ttl":          change.GetTTL(),
-			"seq_no":       change.GetSeqNo(),
-			"operation":    change.GetOperation(),
-			"end_of_batch": change.GetEndOfBatch(),
-			"data":         change.GetRawData(),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to serialize message: %w", err)
+	for _, change := range c.Delta {
+		if err := r.sendChangeToSNS(ctx, change, timestamp, "Delta"); err != nil {
+			return err
 		}
+	}
 
-		_, err = r.snsClient.Publish(ctx, &sns.PublishInput{
-			TopicArn: aws.String(r.snsTopic),
-			Message:  aws.String(string(msg)),
-			Subject:  aws.String(r.snsSubject),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to publish message to topic %q: %w", r.snsTopic, err)
+	for _, change := range c.PreImage {
+		if err := r.sendChangeToSNS(ctx, change, timestamp, "PreImage"); err != nil {
+			return err
+		}
+	}
+
+	for _, change := range c.PostImage {
+		if err := r.sendChangeToSNS(ctx, change, timestamp, "PostImage"); err != nil {
+			return err
 		}
 	}
 
 	r.reporter.Update(c.Time)
 	r.localCount += int64(len(c.Delta))
 
+	return nil
+}
+
+func (r *SNSReplicator) sendChangeToSNS(ctx context.Context, change *scyllacdc.ChangeRow, timestamp int64, recType string) error {
+	change.GetRawData()
+	change.GetOperation()
+
+	msg, err := json.Marshal(map[string]interface{}{
+		"type":         recType,
+		"operation":    change.GetOperation(),
+		"timestamp":    timestamp,
+		"ttl":          change.GetTTL(),
+		"seq_no":       change.GetSeqNo(),
+		"end_of_batch": change.GetEndOfBatch(),
+		"data":         change.GetRawData(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to serialize message: %w", err)
+	}
+
+	_, err = r.snsClient.Publish(ctx, &sns.PublishInput{
+		TopicArn: aws.String(r.snsTopic),
+		Message:  aws.String(string(msg)),
+		Subject:  aws.String(r.snsSubject),
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to send message to SNS: %w", err)
+	}
 	return nil
 }
 
