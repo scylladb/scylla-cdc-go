@@ -54,19 +54,19 @@ func main() {
 	flag.StringVar(&snsRegion, "sns-region", "", "AWS region where SNS topic is deployed")
 
 	flag.String("mode", "", "mode (ignored)")
+
+	adv := scyllacdc.AdvancedReaderConfig{}
+	flag.DurationVar(&adv.ConfidenceWindowSize, "polling-confidence-window-size", 30*time.Second, "")
+	flag.DurationVar(&adv.ChangeAgeLimit, "polling-change-age-limit", 10*time.Minute, "")
+	flag.DurationVar(&adv.QueryTimeWindowSize, "pooling-query-time-window-size", 1*time.Minute, "")
+	flag.DurationVar(&adv.PostEmptyQueryDelay, "polling-post-empty-query-delay", 30*time.Second, "")
+	flag.DurationVar(&adv.PostNonEmptyQueryDelay, "polling-post-non-empty-query-delay", 10*time.Second, "")
+	flag.DurationVar(&adv.PostFailedQueryDelay, "pooling-post-failed-query-delay", 1*time.Second, "")
+
 	flag.Parse()
 
 	clRead := parseConsistency(readConsistency)
 	clWrite := parseConsistency(writeConsistency)
-
-	adv := scyllacdc.AdvancedReaderConfig{
-		ConfidenceWindowSize:   30 * time.Second,
-		ChangeAgeLimit:         10 * time.Minute,
-		QueryTimeWindowSize:    60 * time.Second,
-		PostEmptyQueryDelay:    30 * time.Second,
-		PostNonEmptyQueryDelay: 10 * time.Second,
-		PostFailedQueryDelay:   1 * time.Second,
-	}
 
 	fmt.Println("Parameters:")
 	fmt.Printf("  Keyspace: %s\n", keyspace)
