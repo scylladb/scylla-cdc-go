@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/gocql/gocql"
+
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
 )
 
@@ -14,8 +15,14 @@ import (
 // CREATE TABLE ks.tbl (pk int, ck int, v int, PRIMARY KEY (pk, ck)) WITH cdc = {'enabled': 'true'};
 
 func main() {
-	cluster := gocql.NewCluster("127.0.0.1")
-	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.DCAwareRoundRobinPolicy("local-dc"))
+	if err := run(context.Background(), []string{"127.0.0.1"}, "local-dc", "ks.tbl"); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context, hosts []string, localDC, tableName string) error {
+	cluster := gocql.NewCluster(hosts...)
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.DCAwareRoundRobinPolicy(localDC))
 	session, err := cluster.CreateSession()
 	if err != nil {
 		log.Fatal(err)
@@ -24,19 +31,17 @@ func main() {
 
 	cfg := &scyllacdc.ReaderConfig{
 		Session:               session,
-		TableNames:            []string{"ks.tbl"},
+		TableNames:            []string{tableName},
 		ChangeConsumerFactory: changeConsumerFactory,
 		Logger:                log.New(os.Stderr, "", log.Ldate|log.Lshortfile),
 	}
 
-	reader, err := scyllacdc.NewReader(context.Background(), cfg)
+	reader, err := scyllacdc.NewReader(ctx, cfg)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
-	if err := reader.Run(context.Background()); err != nil {
-		log.Fatal(err)
-	}
+	return reader.Run(ctx)
 }
 
 func consumeChange(ctx context.Context, tableName string, c scyllacdc.Change) error {

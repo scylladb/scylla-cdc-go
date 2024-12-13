@@ -9,6 +9,7 @@ import (
 	"os/signal"
 
 	"github.com/gocql/gocql"
+
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
 )
 
@@ -24,12 +25,17 @@ func main() {
 	flag.StringVar(&source, "source", "127.0.0.1", "address of a node in the cluster")
 	flag.Parse()
 
-	// Configure a session first
+	if err := run(context.Background(), keyspace, table, source); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context, source, keyspace, table string) error {
 	cluster := gocql.NewCluster(source)
 	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.DCAwareRoundRobinPolicy("local-dc"))
 	session, err := cluster.CreateSession()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer session.Close()
 
@@ -40,9 +46,9 @@ func main() {
 		Logger:                log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
 	}
 
-	reader, err := scyllacdc.NewReader(context.Background(), cfg)
+	reader, err := scyllacdc.NewReader(ctx, cfg)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	// React to Ctrl+C signal, and stop gracefully after the first signal
@@ -57,9 +63,7 @@ func main() {
 	}()
 	signal.Notify(signalC, os.Interrupt)
 
-	if err := reader.Run(context.Background()); err != nil {
-		log.Fatal(err)
-	}
+	return reader.Run(ctx)
 }
 
 func printerConsumer(ctx context.Context, tableName string, c scyllacdc.Change) error {

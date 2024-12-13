@@ -15,15 +15,18 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
 )
 
 // TODO: Escape field names?
-var showTimestamps = false
-var debugQueries = false
-var maxWaitBetweenRetries = 5 * time.Second
+var (
+	showTimestamps        = false
+	debugQueries          = false
+	maxWaitBetweenRetries = 5 * time.Second
 
-var reportPeriod = 1 * time.Minute
+	reportPeriod = 1 * time.Minute
+)
 
 func main() {
 	var (
@@ -305,16 +308,6 @@ type DeltaReplicator struct {
 	reporter *scyllacdc.PeriodicProgressReporter
 }
 
-type updateQuerySet struct {
-	add    string
-	remove string
-}
-
-type udtInfo struct {
-	setterQuery string
-	fields      []string
-}
-
 func NewDeltaReplicator(
 	ctx context.Context,
 	session *gocql.Session,
@@ -502,7 +495,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 		})
 	}
 
-	keyColumns := append(r.pkColumns, r.ckColumns...)
+	keyColumns := append(r.pkColumns, r.ckColumns...) //nolint:gocritic
 
 	if isInsert {
 		// Insert row to make a row marker
@@ -522,7 +515,8 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 		typ := r.columnTypes[colName]
 		isNonFrozenCollection := !typ.IsFrozen() && typ.Type().IsCollection()
 
-		if !isNonFrozenCollection {
+		switch {
+		case !isNonFrozenCollection:
 			atomicChange := c.GetAtomicChange(colName)
 			if atomicChange.IsDeleted {
 				// Delete the value from the column
@@ -551,7 +545,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 					return err
 				}
 			}
-		} else if typ.Type() == TypeList {
+		case typ.Type() == TypeList:
 			listChange := c.GetListChange(colName)
 			if listChange.IsReset {
 				// We can't just do UPDATE SET l = [...],
@@ -619,7 +613,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 					}
 				}
 			}
-		} else if typ.Type() == TypeSet || typ.Type() == TypeMap {
+		case typ.Type() == TypeSet || typ.Type() == TypeMap:
 			// TODO: Better comment
 			// Fortunately, both cases can be handled by the same code
 			// by using reflection. We are forced to use reflection anyway.
@@ -686,7 +680,7 @@ func (r *DeltaReplicator) processInsertOrUpdate(ctx context.Context, timestamp i
 					}
 				}
 			}
-		} else if typ.Type() == TypeUDT {
+		case typ.Type() == TypeUDT:
 			udtChange := c.GetUDTChange(colName)
 			if udtChange.IsReset {
 				// The column was overwritten

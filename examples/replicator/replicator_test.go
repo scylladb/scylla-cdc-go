@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
 	"github.com/scylladb/scylla-cdc-go/internal/testutils"
 )
@@ -393,12 +394,12 @@ func TestReplicator(t *testing.T) {
 		sourceAddress,
 		destinationAddress,
 		schemaNames,
-		&adv, gocql.Quorum,
+		&adv,
+		gocql.Quorum,
 		gocql.Quorum,
 		"",
 		logger,
 	)
-
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +471,9 @@ func TestReplicator(t *testing.T) {
 	}
 }
 
-func createSessionAndSetupSchema(t *testing.T, addr string, keyspaceName string, withCdc bool, schemas map[string]string) *gocql.Session {
+func createSessionAndSetupSchema(t *testing.T, addr, keyspaceName string, withCdc bool, schemas map[string]string) *gocql.Session {
+	t.Helper()
+
 	testutils.CreateKeyspace(t, addr, keyspaceName)
 
 	cfg := gocql.NewCluster(addr)
@@ -501,6 +504,8 @@ func createSessionAndSetupSchema(t *testing.T, addr string, keyspaceName string,
 }
 
 func execQuery(t *testing.T, session *gocql.Session, query string) {
+	t.Helper()
+
 	t.Logf("executing query %s", query)
 	err := session.Query(query).Exec()
 	if err != nil {
@@ -509,6 +514,8 @@ func execQuery(t *testing.T, session *gocql.Session, query string) {
 }
 
 func fetchFullSet(t *testing.T, session *gocql.Session, schemas map[string]string) map[string][]map[string]interface{} {
+	t.Helper()
+
 	groups := make(map[string][]map[string]interface{})
 
 	for tbl := range schemas {
