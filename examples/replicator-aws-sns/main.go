@@ -56,12 +56,12 @@ func main() {
 	flag.String("mode", "", "mode (ignored)")
 
 	adv := scyllacdc.AdvancedReaderConfig{}
-	flag.DurationVar(&adv.ConfidenceWindowSize, "polling-confidence-window-size", 30*time.Second, "")
-	flag.DurationVar(&adv.ChangeAgeLimit, "polling-change-age-limit", 10*time.Minute, "")
-	flag.DurationVar(&adv.QueryTimeWindowSize, "pooling-query-time-window-size", 1*time.Minute, "")
-	flag.DurationVar(&adv.PostEmptyQueryDelay, "polling-post-empty-query-delay", 30*time.Second, "")
-	flag.DurationVar(&adv.PostNonEmptyQueryDelay, "polling-post-non-empty-query-delay", 10*time.Second, "")
-	flag.DurationVar(&adv.PostFailedQueryDelay, "pooling-post-failed-query-delay", 1*time.Second, "")
+	flag.DurationVar(&adv.ConfidenceWindowSize, "polling-confidence-window-size", 30*time.Second, "defines a minimal age a change must have in order to be read.")
+	flag.DurationVar(&adv.ChangeAgeLimit, "polling-change-age-limit", 10*time.Minute, "When the library starts for the first time it has to start consuming\nchanges from some point in time. This parameter defines how far in the\npast it needs to look. If the value of the parameter is set to an hour,\nthen the library will only read historical changes that are no older than\nan hour.")
+	flag.DurationVar(&adv.QueryTimeWindowSize, "pooling-query-time-window-size", 1*time.Minute, "Changes are queried using select statements with restriction on the time\nthose changes appeared. The restriction is bounding the time from both\nlower and upper bounds. This parameter defines the width of the time\nwindow used for the restriction.")
+	flag.DurationVar(&adv.PostEmptyQueryDelay, "polling-post-empty-query-delay", 30*time.Second, "The library uses select statements to fetch changes from CDC Log tables.\nEach select fetches changes from a single table and fetches only changes\nfrom a limited set of CDC streams. If such select returns no changes then\nnext select to this table and set of CDC streams will be issued after\na delay. This parameter specifies the length of the delay")
+	flag.DurationVar(&adv.PostNonEmptyQueryDelay, "polling-post-non-empty-query-delay", 10*time.Second, "The library uses select statements to fetch changes from CDC Log tables.\nEach select fetches changes from a single table and fetches only changes\nfrom a limited set of CDC streams. If such select returns one or more\nchanges then next select to this table and set of CDC streams will be\nissued after a delay. This parameter specifies the length of the delay")
+	flag.DurationVar(&adv.PostFailedQueryDelay, "pooling-post-failed-query-delay", 1*time.Second, "If the library tries to read from the CDC log and the read operation\nfails, it will wait some time before attempting to read again. This\nparameter specifies the length of the delay.")
 
 	flag.Parse()
 
