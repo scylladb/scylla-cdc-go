@@ -15,24 +15,30 @@ import (
 
 func main() {
 	var (
-		keyspace string
-		table    string
-		source   string
+		keyspace   string
+		table      string
+		source     string
+		datacenter string
 	)
 
 	flag.StringVar(&keyspace, "keyspace", "", "keyspace name")
 	flag.StringVar(&table, "table", "", "table name")
 	flag.StringVar(&source, "source", "127.0.0.1", "address of a node in the cluster")
+	flag.StringVar(&datacenter, "datacenter", "", "target datacenter")
 	flag.Parse()
 
-	if err := run(context.Background(), keyspace, table, source); err != nil {
+	if err := run(context.Background(), source, datacenter, keyspace, table); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, source, keyspace, table string) error {
+func run(ctx context.Context, source, datacenter, keyspace, table string) error {
 	cluster := gocql.NewCluster(source)
-	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.DCAwareRoundRobinPolicy("local-dc"))
+	if datacenter == "" {
+		cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
+	} else {
+		cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.DCAwareRoundRobinPolicy(datacenter))
+	}
 	session, err := cluster.CreateSession()
 	if err != nil {
 		return err
