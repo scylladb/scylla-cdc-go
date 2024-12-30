@@ -12,7 +12,7 @@ import (
 
 	"github.com/gocql/gocql"
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
-	"github.com/scylladb/scylla-cdc-go/internal/testutils"
+	"github.com/scylladb/scylla-cdc-go/testutils"
 )
 
 type schema struct {
@@ -345,6 +345,13 @@ func TestReplicator(t *testing.T) {
 	}
 	re := regexp.MustCompile(filter)
 
+	topic := os.Getenv("SNS_TEST_TOPIC")
+	subject := os.Getenv("SNS_TEST_SUBJECT")
+
+	if topic == "" || subject == "" {
+		t.Fatal("SNS_TEST_TOPIC and SNS_TEST_SUBJECT can't be empty")
+	}
+
 	// Collect all schemas
 	schemas := make(map[string]string)
 	for _, tc := range testCases {
@@ -393,6 +400,7 @@ func TestReplicator(t *testing.T) {
 		sourceAddress,
 		destinationAddress,
 		schemaNames,
+		topic, subject, "",
 		&adv, gocql.Quorum,
 		gocql.Quorum,
 		"",

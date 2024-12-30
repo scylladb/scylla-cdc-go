@@ -2,6 +2,7 @@ package scyllacdc_test
 
 import (
 	"context"
+	"github.com/scylladb/scylla-cdc-go/testutils"
 	"log"
 	"os"
 	"sync"
@@ -11,7 +12,6 @@ import (
 	"github.com/gocql/gocql"
 
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
-	"github.com/scylladb/scylla-cdc-go/internal/testutils"
 )
 
 type recordingConsumer struct {

@@ -3,6 +3,7 @@ package scyllacdc_test
 import (
 	"context"
 	"fmt"
+	"github.com/scylladb/scylla-cdc-go/testutils"
 	"log"
 	"os"
 	"reflect"
@@ -14,7 +15,6 @@ import (
 	"github.com/gocql/gocql"
 
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
-	"github.com/scylladb/scylla-cdc-go/internal/testutils"
 )
 
 type change map[string]interface{}
