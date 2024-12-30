@@ -2,7 +2,6 @@ package scyllacdc_test
 
 import (
 	"context"
-	"github.com/scylladb/scylla-cdc-go/testutils"
 	"log"
 	"os"
 	"sync"
@@ -10,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+
+	"github.com/scylladb/scylla-cdc-go/testutils"
 
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
 )

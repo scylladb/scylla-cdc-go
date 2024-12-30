@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/scylladb/scylla-cdc-go/testutils"
 	"log"
 	"os"
 	"reflect"
@@ -12,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+
+	"github.com/scylladb/scylla-cdc-go/testutils"
 
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
 )
