@@ -297,6 +297,9 @@ type PUBReplicator struct {
 	reporter *scyllacdc.PeriodicProgressReporter
 }
 
+var globalGCPPubSubClient atomic.Pointer[pubsub.Client]
+var globalGCPPubSubClientMutex sync.Mutex
+
 func NewPUBReplicator(
 	ctx context.Context,
 	projectID, topic string,
@@ -305,9 +308,20 @@ func NewPUBReplicator(
 	reporter *scyllacdc.ProgressReporter,
 	logger scyllacdc.Logger,
 ) (*PUBReplicator, error) {
-	cl, err := pubsub.NewClient(ctx, projectID)
-	if err != nil {
-		return nil, err
+	cl := globalGCPPubSubClient.Load()
+	if cl == nil {
+		var err error
+		globalGCPPubSubClientMutex.Lock()
+		defer globalGCPPubSubClientMutex.Unlock()
+		cl = globalGCPPubSubClient.Load()
+		if cl == nil {
+			cl, err = pubsub.NewClient(ctx, projectID)
+			if err != nil {
+				return nil, err
+			}
+
+			globalGCPPubSubClient.Store(cl)
+		}
 	}
 
 	dr := &PUBReplicator{
