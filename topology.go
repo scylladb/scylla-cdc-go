@@ -23,10 +23,23 @@ const (
 	timestampsTableSince4_4 = "system_distributed.cdc_generation_timestamps"
 	streamsTableSince4_4    = "system_distributed.cdc_streams_descriptions_v2"
 
+	timestampsTableForTablets = "system.cdc_timestamps"
+	streamsTableForTablets    = "system.cdc_streams"
+
+	getGenerationTimesQueryForTablets = "SELECT timestamp FROM " + timestampsTableForTablets + " WHERE keyspace_name = ? AND table_name = ?"
+	getGenerationQueryForTablets      = "SELECT stream_id FROM " + streamsTableForTablets + " WHERE keyspace_name = ? AND table_name = ? AND timestamp = ? AND stream_state = ?"
+
 	// TODO: Switch to a model which reacts to cluster state changes
 	// and forces a refresh when all worker goroutines did not report any
 	// changes for some time
 	generationFetchPeriod time.Duration = 15 * time.Second
+)
+
+// follows the stream_state column in system.cdc_streams
+const (
+	StreamStateCurrent = 0
+	StreamStateClosed  = 1
+	StreamStateOpened  = 2
 )
 
 type generation struct {
@@ -409,6 +422,52 @@ func (gs *generationSourceSince4_4) getGenerationTimes(consistency gocql.Consist
 
 func (gs *generationSourceSince4_4) maybeUpgrade() (generationSource, error) {
 	// No newer format is known
+	return gs, nil
+}
+
+type generationSourceTablets struct {
+	session   *gocql.Session
+	logger    Logger
+	keyspace  string
+	tableName string
+}
+
+func (gs *generationSourceTablets) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+	var streams []StreamID
+	iter := gs.session.Query(getGenerationQueryForTablets, gs.keyspace, gs.tableName, genTime, StreamStateCurrent).
+		Consistency(consistency).
+		Iter()
+
+	var streamID StreamID
+	for iter.Scan(&streamID) {
+		streams = append(streams, streamID)
+	}
+
+	if err := iter.Close(); err != nil {
+		return nil, fmt.Errorf("failed to get generations for %s.%s: %w", gs.keyspace, gs.tableName, err)
+	}
+	return streams, nil
+}
+
+func (gs *generationSourceTablets) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
+	iter := gs.session.Query(getGenerationTimesQueryForTablets, gs.keyspace, gs.tableName).
+		Consistency(consistency).
+		Iter()
+	var (
+		times    []time.Time
+		currTime time.Time
+	)
+	for iter.Scan(&currTime) {
+		times = append(times, currTime)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, fmt.Errorf("failed to get timestamps for %s.%s: %w", gs.keyspace, gs.tableName, err)
+	}
+	return times, nil
+}
+
+func (gs *generationSourceTablets) maybeUpgrade() (generationSource, error) {
+	// No newer format is known for tablets
 	return gs, nil
 }
 
