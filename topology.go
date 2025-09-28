@@ -87,8 +87,9 @@ func newGenerationFetcher(
 	session *gocql.Session,
 	startFrom time.Time,
 	logger Logger,
+	tableNames []string,
 ) (*generationFetcher, error) {
-	source, err := chooseGenerationSource(session, logger)
+	source, err := chooseGenerationSource(session, logger, tableNames)
 	if err != nil {
 		return nil, fmt.Errorf("failed to detect version of the generation tables used by the cluster: %v", err)
 	}
@@ -107,7 +108,34 @@ func newGenerationFetcher(
 	return gf, nil
 }
 
-func chooseGenerationSource(session *gocql.Session, logger Logger) (generationSource, error) {
+func chooseGenerationSource(session *gocql.Session, logger Logger, tableNames []string) (generationSource, error) {
+	anyUsesTablets := false
+	for _, tableName := range tableNames {
+		tableUsesTablets, err := usesTablets(session, tableName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine if table %s uses tablets-based CDC: %v", tableName, err)
+		}
+		anyUsesTablets = anyUsesTablets || tableUsesTablets
+	}
+
+	if anyUsesTablets {
+		if len(tableNames) > 1 {
+			return nil, errors.New("cannot use multiple tables when at least one of them uses tablets-based CDC")
+		}
+		decomposed := strings.SplitN(tableNames[0], ".", 2)
+		if len(decomposed) < 2 {
+			return nil, errors.New("unqualified table name passed to chooseGenerationSource")
+		}
+		keyspace := decomposed[0]
+		table := decomposed[1]
+		return &generationSourceTablets{
+			session:   session,
+			logger:    logger,
+			keyspace:  keyspace,
+			tableName: table,
+		}, nil
+	}
+
 	hasPre4_4, err := isTableInSchema(session, generationsTableNamePre4_4)
 	if err != nil {
 		return nil, err
@@ -492,4 +520,34 @@ func isTableInSchema(session *gocql.Session, tableName string) (bool, error) {
 
 	_, ok := meta.Tables[table]
 	return ok, nil
+}
+
+func usesTablets(session *gocql.Session, tableName string) (bool, error) {
+	decomposed := strings.SplitN(tableName, ".", 2)
+	if len(decomposed) < 2 {
+		return false, errors.New("unqualified table name passed to usesTablets")
+	}
+
+	keyspace := decomposed[0]
+
+	data := make(map[string]interface{})
+	err := session.Query("SELECT * FROM system_schema.scylla_keyspaces WHERE keyspace_name = ?", keyspace).
+		MapScan(data)
+
+	if errors.Is(err, gocql.ErrNotFound) {
+		// Keyspace not found in scylla_keyspaces table, assume no tablets
+		return false, nil
+	}
+
+	if err != nil {
+		return false, fmt.Errorf("failed to find keyspace %s: %w", keyspace, err)
+	}
+
+	// Check if the result contains 'initial_tablets' column and it's not null
+	initialTablets, exists := data["initial_tablets"]
+	if exists && initialTablets != nil {
+		return true, nil
+	}
+
+	return false, nil
 }

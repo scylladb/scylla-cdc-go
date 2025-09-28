@@ -189,6 +189,7 @@ func NewReader(ctx context.Context, config *ReaderConfig) (*Reader, error) {
 		config.Session,
 		readFrom,
 		config.Logger,
+		config.TableNames,
 	)
 	if err != nil {
 		return nil, err
