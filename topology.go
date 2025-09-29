@@ -2,6 +2,7 @@ package scyllacdc
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -44,7 +45,7 @@ const (
 
 type generation struct {
 	startTime time.Time
-	streams   []StreamID
+	streams   [][]StreamID
 }
 
 // StreamID represents an ID of a stream from a CDC log (cdc$time column).
@@ -332,7 +333,7 @@ func (gf *generationFetcher) getClusterSize() (int, error) {
 }
 
 type generationSource interface {
-	getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error)
+	getGeneration(genTime time.Time, consistency gocql.Consistency) ([][]StreamID, error)
 	getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error)
 
 	maybeUpgrade() (generationSource, error)
@@ -343,7 +344,7 @@ type generationSourcePre4_4 struct {
 	logger  Logger
 }
 
-func (gs *generationSourcePre4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+func (gs *generationSourcePre4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([][]StreamID, error) {
 	var streams []StreamID
 	err := gs.session.Query("SELECT streams FROM "+generationsTableNamePre4_4+" WHERE time = ?", genTime).
 		Consistency(consistency).
@@ -351,7 +352,7 @@ func (gs *generationSourcePre4_4) getGeneration(genTime time.Time, consistency g
 	if err != nil {
 		return nil, err
 	}
-	return streams, err
+	return splitStreamsByVnode(streams), nil
 }
 
 func (gs *generationSourcePre4_4) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
@@ -414,7 +415,7 @@ type generationSourceSince4_4 struct {
 	logger  Logger
 }
 
-func (gs *generationSourceSince4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+func (gs *generationSourceSince4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([][]StreamID, error) {
 	var streams []StreamID
 	iter := gs.session.Query("SELECT streams FROM "+streamsTableSince4_4+" WHERE time = ?", genTime).
 		Consistency(consistency).
@@ -428,7 +429,7 @@ func (gs *generationSourceSince4_4) getGeneration(genTime time.Time, consistency
 	if err := iter.Close(); err != nil {
 		return nil, err
 	}
-	return streams, nil
+	return splitStreamsByVnode(streams), nil
 }
 
 func (gs *generationSourceSince4_4) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
@@ -460,7 +461,7 @@ type generationSourceTablets struct {
 	tableName string
 }
 
-func (gs *generationSourceTablets) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+func (gs *generationSourceTablets) getGeneration(genTime time.Time, consistency gocql.Consistency) ([][]StreamID, error) {
 	var streams []StreamID
 	iter := gs.session.Query(getGenerationQueryForTablets, gs.keyspace, gs.tableName, genTime, StreamStateCurrent).
 		Consistency(consistency).
@@ -474,7 +475,13 @@ func (gs *generationSourceTablets) getGeneration(genTime time.Time, consistency 
 	if err := iter.Close(); err != nil {
 		return nil, fmt.Errorf("failed to get generations for %s.%s: %w", gs.keyspace, gs.tableName, err)
 	}
-	return streams, nil
+
+	// For tablets, put each stream in its own group. the vnode index is meaningless
+	groups := make([][]StreamID, 0, len(streams))
+	for _, stream := range streams {
+		groups = append(groups, []StreamID{stream})
+	}
+	return groups, nil
 }
 
 func (gs *generationSourceTablets) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
@@ -550,4 +557,46 @@ func usesTablets(session *gocql.Session, tableName string) (bool, error) {
 	}
 
 	return false, nil
+}
+
+func splitStreamsByVnode(streams []StreamID) [][]StreamID {
+	vnodesIdxToStreams := make(map[int64][]StreamID, 0)
+	for _, stream := range streams {
+		idx := getVnodeIndexForStream(stream)
+		vnodesIdxToStreams[idx] = append(vnodesIdxToStreams[idx], stream)
+	}
+
+	groups := make([][]StreamID, 0, len(vnodesIdxToStreams[-1])+len(vnodesIdxToStreams))
+
+	// Idx -1 means that we don't know the vnode for given stream,
+	// therefore we will put those streams into a separate group
+	for _, stream := range vnodesIdxToStreams[-1] {
+		groups = append(groups, []StreamID{stream})
+	}
+
+	for vnode, group := range vnodesIdxToStreams {
+		if vnode != -1 {
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+// Computes vnode index from given stream ID.
+// Returns -1 if the stream ID format is unrecognized.
+func getVnodeIndexForStream(streamID StreamID) int64 {
+	if len(streamID) != 16 {
+		// Don't know how to handle other sizes
+		return -1
+	}
+
+	lowerQword := binary.BigEndian.Uint64(streamID[8:16])
+	version := lowerQword & (1<<4 - 1)
+	if version != 1 {
+		// Unrecognized version
+		return -1
+	}
+
+	vnodeIdx := (lowerQword >> 4) & (1<<22 - 1)
+	return int64(vnodeIdx)
 }
