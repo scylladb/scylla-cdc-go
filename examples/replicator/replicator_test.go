@@ -417,6 +417,12 @@ func TestReplicator(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	validateReplication(t, sourceSession, destinationSession, schemas)
+}
+
+func validateReplication(t *testing.T, sourceSession, destinationSession *gocql.Session, schemas map[string]string) {
+	t.Helper()
+
 	t.Log("validating results")
 
 	// Compare
