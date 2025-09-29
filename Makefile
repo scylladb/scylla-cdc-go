@@ -100,7 +100,7 @@ else
 endif
 
 
-install-golangci-lint: GOLANGCI_VERSION = 1.60.1
+install-golangci-lint: GOLANGCI_VERSION = 2.6.0
 install-golangci-lint: Makefile
 ifeq ($(GOARCH),arm64)
 	$(call dl_tgz,golangci-lint,${GOLANGCI_VERSION},https://github.com/golangci/golangci-lint/releases/download/v$(GOLANGCI_VERSION)/golangci-lint-$(GOLANGCI_VERSION)-$(GOOS)-arm64.tar.gz)

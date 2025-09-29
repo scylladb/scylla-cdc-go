@@ -1,40 +1,58 @@
-issues:
-  exclude-rules:
-    - path: examples/*
-      linters:
-        - forbidigo
+version: "2"
+run:
+  go: "1.14"
+  modules-download-mode: readonly
+  tests: true
+  allow-parallel-runners: true
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
+    - forbidigo
     - gocritic
-    - gofumpt
     - goheader
-    - goimports
-    - gosimple
     - govet
     - ineffassign
-    #- lll
     - misspell
     - predeclared
     - staticcheck
     - thelper
     - tparallel
-    - typecheck
     - unused
-    - forbidigo
-run:
-  allow-parallel-runners: true
-  modules-download-mode: readonly
-  tests: true
-  go: '1.14'
-linters-settings:
-  govet:
-    enable-all: true
-    disable:
-      - shadow
-      - fieldalignment
-  gofumpt:
-    extra-rules: true
-  goimports:
-    local-prefixes: github.com/scylladb/scylla-cdc-go
+  settings:
+    govet:
+      disable:
+        - shadow
+        - fieldalignment
+      enable-all: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - forbidigo
+        path: examples/*
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra-rules: true
+    goimports:
+      local-prefixes:
+        - github.com/scylladb/scylla-cdc-go
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
