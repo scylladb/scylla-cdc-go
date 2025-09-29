@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -15,14 +16,25 @@ import (
 // CREATE TABLE ks.tbl (pk int, ck int, v int, PRIMARY KEY (pk, ck)) WITH cdc = {'enabled': 'true'};
 
 func main() {
-	if err := run(context.Background(), []string{"127.0.0.1"}, "local-dc", "ks.tbl"); err != nil {
+	var (
+		keyspace string
+		table    string
+		source   string
+	)
+
+	flag.StringVar(&keyspace, "keyspace", "ks", "keyspace name")
+	flag.StringVar(&table, "table", "tbl", "table name")
+	flag.StringVar(&source, "source", "127.0.0.1", "address of a node in the cluster")
+	flag.Parse()
+
+	if err := run(context.Background(), source, keyspace, table); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, hosts []string, localDC, tableName string) error {
-	cluster := gocql.NewCluster(hosts...)
-	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.DCAwareRoundRobinPolicy(localDC))
+func run(ctx context.Context, source, keyspace, table string) error {
+	cluster := gocql.NewCluster(source)
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
 	session, err := cluster.CreateSession()
 	if err != nil {
 		log.Fatal(err)
@@ -31,7 +43,7 @@ func run(ctx context.Context, hosts []string, localDC, tableName string) error {
 
 	cfg := &scyllacdc.ReaderConfig{
 		Session:               session,
-		TableNames:            []string{tableName},
+		TableNames:            []string{keyspace + "." + table},
 		ChangeConsumerFactory: changeConsumerFactory,
 		Logger:                log.New(os.Stderr, "", log.Ldate|log.Lshortfile),
 	}
