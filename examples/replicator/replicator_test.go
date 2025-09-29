@@ -357,10 +357,10 @@ func TestReplicator(t *testing.T) {
 	destinationAddress := testutils.GetDestinationClusterContactPoint()
 	keyspaceName := testutils.GetUniqueName("test_keyspace")
 
-	sourceSession := createSessionAndSetupSchema(t, sourceAddress, keyspaceName, true, schemas)
+	sourceSession := createSessionAndSetupSchema(t, sourceAddress, keyspaceName, true, schemas, false)
 	defer sourceSession.Close()
 
-	destinationSession := createSessionAndSetupSchema(t, destinationAddress, keyspaceName, false, schemas)
+	destinationSession := createSessionAndSetupSchema(t, destinationAddress, keyspaceName, false, schemas, false)
 	defer destinationSession.Close()
 
 	// Execute all of the queries
@@ -472,10 +472,10 @@ func TestReplicator(t *testing.T) {
 	}
 }
 
-func createSessionAndSetupSchema(t *testing.T, addr, keyspaceName string, withCdc bool, schemas map[string]string) *gocql.Session {
+func createSessionAndSetupSchema(t *testing.T, addr, keyspaceName string, withCdc bool, schemas map[string]string, tabletsEnabled bool) *gocql.Session {
 	t.Helper()
 
-	testutils.CreateKeyspace(t, addr, keyspaceName)
+	testutils.CreateKeyspace(t, addr, keyspaceName, tabletsEnabled)
 
 	cfg := gocql.NewCluster(addr)
 	cfg.Keyspace = keyspaceName

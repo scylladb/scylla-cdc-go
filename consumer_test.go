@@ -60,7 +60,7 @@ func TestConsumerCallsEmptyCallback(t *testing.T) {
 
 	// Configure a session
 	address := testutils.GetSourceClusterContactPoint()
-	keyspaceName := testutils.CreateUniqueKeyspace(t, address)
+	keyspaceName := testutils.CreateUniqueKeyspace(t, address, false)
 	cluster := gocql.NewCluster(address)
 	cluster.Keyspace = keyspaceName
 	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
@@ -127,7 +127,7 @@ func TestConsumerResumesWithTableBackedProgressReporter(t *testing.T) {
 
 	// Configure a session
 	address := testutils.GetSourceClusterContactPoint()
-	keyspaceName := testutils.CreateUniqueKeyspace(t, address)
+	keyspaceName := testutils.CreateUniqueKeyspace(t, address, false)
 	cluster := gocql.NewCluster(address)
 	cluster.Keyspace = keyspaceName
 	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
@@ -223,7 +223,7 @@ func TestConsumerHonorsTableTTL(t *testing.T) {
 
 	// Configure a session
 	address := testutils.GetSourceClusterContactPoint()
-	keyspaceName := testutils.CreateUniqueKeyspace(t, address)
+	keyspaceName := testutils.CreateUniqueKeyspace(t, address, false)
 	cluster := gocql.NewCluster(address)
 	cluster.Keyspace = keyspaceName
 	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
