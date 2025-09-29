@@ -478,6 +478,83 @@ func validateReplication(t *testing.T, sourceSession, destinationSession *gocql.
 	}
 }
 
+func TestReplicatorWithTablets(t *testing.T) {
+	sourceAddress := testutils.GetSourceClusterContactPoint()
+	destinationAddress := testutils.GetDestinationClusterContactPoint()
+	keyspaceName := testutils.GetUniqueName("test_keyspace_tablets")
+
+	// Create schema for tablets test
+	schema := map[string]string{
+		"tbl_tablets": "CREATE TABLE tbl_tablets (pk text, ck int, v1 int, v2 text, PRIMARY KEY (pk, ck))",
+	}
+
+	sourceSession := createSessionAndSetupSchema(t, sourceAddress, keyspaceName, true, schema, true)
+	defer sourceSession.Close()
+
+	destinationSession := createSessionAndSetupSchema(t, destinationAddress, keyspaceName, false, schema, true)
+	defer destinationSession.Close()
+
+	// Execute test queries
+	testQueries := []string{
+		"INSERT INTO tbl_tablets (pk, ck, v1, v2) VALUES ('partition_a', 1, 500, 'alpha')",
+		"INSERT INTO tbl_tablets (pk, ck, v1, v2) VALUES ('partition_a', 2, 600, 'beta')",
+		"INSERT INTO tbl_tablets (pk, ck, v1, v2) VALUES ('partition_b', 1, 700, 'gamma')",
+		"UPDATE tbl_tablets SET v2 = 'delta' WHERE pk = 'partition_b' AND ck = 1",
+		"INSERT INTO tbl_tablets (pk, ck, v1, v2) VALUES ('partition_c', 1, 800, 'epsilon')",
+		"INSERT INTO tbl_tablets (pk, ck, v1, v2) VALUES ('partition_c', 2, 900, 'zeta')",
+		"INSERT INTO tbl_tablets (pk, ck, v1, v2) VALUES ('partition_c', 3, 1000, 'eta')",
+		"DELETE FROM tbl_tablets WHERE pk = 'partition_c' AND ck = 2",
+		"UPDATE tbl_tablets SET v1 = 1100, v2 = 'theta' WHERE pk = 'partition_a' AND ck = 1",
+	}
+
+	for _, query := range testQueries {
+		execQuery(t, sourceSession, query)
+	}
+
+	t.Log("running replicator")
+
+	adv := scyllacdc.AdvancedReaderConfig{
+		ChangeAgeLimit:         time.Minute,
+		PostNonEmptyQueryDelay: 3 * time.Second,
+		PostEmptyQueryDelay:    3 * time.Second,
+		PostFailedQueryDelay:   3 * time.Second,
+		QueryTimeWindowSize:    5 * time.Minute,
+		ConfidenceWindowSize:   time.Millisecond,
+	}
+
+	schemaNames := []string{fmt.Sprintf("%s.%s", keyspaceName, "tbl_tablets")}
+
+	logger := log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
+	replicator, err := newReplicator(
+		context.Background(),
+		sourceAddress,
+		destinationAddress,
+		schemaNames,
+		&adv,
+		gocql.Quorum,
+		gocql.Quorum,
+		"",
+		logger,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	errC := make(chan error)
+	go func() { errC <- replicator.Run(ctx) }()
+
+	time.Sleep(2 * time.Second)
+
+	replicator.StopAt(time.Now().Add(time.Second))
+	if err := <-errC; err != nil {
+		t.Fatal(err)
+	}
+
+	validateReplication(t, sourceSession, destinationSession, schema)
+}
+
 func createSessionAndSetupSchema(t *testing.T, addr, keyspaceName string, withCdc bool, schemas map[string]string, tabletsEnabled bool) *gocql.Session {
 	t.Helper()
 
