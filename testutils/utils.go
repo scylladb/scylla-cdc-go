@@ -68,6 +68,19 @@ func CreateKeyspace(t *testing.T, contactPoint, keyspaceName string, tabletsEnab
 	if err != nil {
 		t.Fatalf("awaiting schema agreement failed: %v", err)
 	}
+
+	// Check if CDC is supported by attempting to create a test table with CDC enabled
+	testTableName := "cdc_support_test"
+	cdcTestQuery := fmt.Sprintf("CREATE TABLE %s.%s (pk int PRIMARY KEY, v int) WITH cdc = {'enabled': true}", keyspaceName, testTableName)
+	err = session.Query(cdcTestQuery).Exec()
+	if err != nil {
+		t.Skipf("CDC is not supported on this cluster: %v", err)
+		return
+	}
+
+	// Clean up the test table
+	dropTestQuery := fmt.Sprintf("DROP TABLE %s.%s", keyspaceName, testTableName)
+	_ = session.Query(dropTestQuery).Exec() // Ignore errors on cleanup
 }
 
 func CreateUniqueKeyspace(t *testing.T, contactPoint string, tabletsEnabled bool) string {
