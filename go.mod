@@ -3,7 +3,7 @@ module github.com/scylladb/scylla-cdc-go
 go 1.24.0
 
 require (
-	github.com/gocql/gocql v0.0.0-20201215165327-e49edf966d90
+	github.com/gocql/gocql/v2 v2.0.0
 	golang.org/x/sync v0.17.0
 )
 
