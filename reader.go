@@ -2,7 +2,6 @@ package scyllacdc
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -189,6 +188,7 @@ func NewReader(ctx context.Context, config *ReaderConfig) (*Reader, error) {
 		config.Session,
 		readFrom,
 		config.Logger,
+		config.TableNames,
 	)
 	if err != nil {
 		return nil, err
@@ -287,9 +287,14 @@ func (r *Reader) Run(ctx context.Context) error {
 			}
 
 			// Start batch readers for this generation
-			split := r.splitStreams(gen.streams)
+			// Use pre-grouped streams from generation fetcher
+			split := gen.streams
+			totalStreams := 0
+			for _, group := range split {
+				totalStreams += len(group)
+			}
 
-			l.Printf("grouped %d streams into %d batches", len(gen.streams), len(split))
+			l.Printf("grouped %d streams into %d batches", totalStreams, len(split))
 
 			genErrG, genCtx := errgroup.WithContext(runCtx)
 
@@ -400,45 +405,4 @@ func (r *Reader) Stop() {
 func (r *Reader) StopAt(at time.Time) {
 	r.stopTime.Store(at)
 	close(r.stoppedCh)
-}
-
-func (r *Reader) splitStreams(streams []StreamID) [][]StreamID {
-	vnodesIdxToStreams := make(map[int64][]StreamID, 0)
-	for _, stream := range streams {
-		idx := getVnodeIndexForStream(stream)
-		vnodesIdxToStreams[idx] = append(vnodesIdxToStreams[idx], stream)
-	}
-
-	groups := make([][]StreamID, 0)
-
-	// Idx -1 means that we don't know the vnode for given stream,
-	// therefore we will put those streams into a separate group
-	for _, stream := range vnodesIdxToStreams[-1] {
-		groups = append(groups, []StreamID{stream})
-	}
-	delete(vnodesIdxToStreams, -1)
-
-	for _, group := range vnodesIdxToStreams {
-		groups = append(groups, group)
-	}
-	return groups
-}
-
-// Computes vnode index from given stream ID.
-// Returns -1 if the stream ID format is unrecognized.
-func getVnodeIndexForStream(streamID StreamID) int64 {
-	if len(streamID) != 16 {
-		// Don't know how to handle other sizes
-		return -1
-	}
-
-	lowerQword := binary.BigEndian.Uint64(streamID[8:16])
-	version := lowerQword & (1<<4 - 1)
-	if version != 1 {
-		// Unrecognized version
-		return -1
-	}
-
-	vnodeIdx := (lowerQword >> 4) & (1<<22 - 1)
-	return int64(vnodeIdx)
 }
