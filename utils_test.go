@@ -2,6 +2,7 @@ package scyllacdc
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gocql/gocql"
 )
@@ -38,5 +39,64 @@ func TestTimeUUIDCompare(t *testing.T) {
 				t.Errorf("expected %s to be larger than %s", u1, u2)
 			}
 		}
+	}
+}
+
+func TestBackoffDelay(t *testing.T) {
+	base := 1 * time.Second
+	maxDelay := 30 * time.Second
+
+	tests := []struct {
+		failures int
+		expected time.Duration
+	}{
+		{1, 1 * time.Second},
+		{2, 2 * time.Second},
+		{3, 4 * time.Second},
+		{4, 8 * time.Second},
+		{5, 16 * time.Second},
+		{6, 30 * time.Second}, // capped
+		{7, 30 * time.Second}, // stays capped
+		{100, 30 * time.Second},
+	}
+
+	for _, tt := range tests {
+		got := backoffDelay(base, maxDelay, tt.failures)
+		if got != tt.expected {
+			t.Errorf("backoffDelay(%v, %v, %d) = %v, want %v", base, maxDelay, tt.failures, got, tt.expected)
+		}
+	}
+}
+
+func TestBackoffDelayNoOverflow(t *testing.T) {
+	base := time.Hour
+	maxDelay := 24 * time.Hour
+
+	got := backoffDelay(base, maxDelay, 1000)
+	if got != maxDelay {
+		t.Errorf("backoffDelay with extreme failures = %v, want %v (should cap, not overflow)", got, maxDelay)
+	}
+	if got < 0 {
+		t.Errorf("backoffDelay overflowed to negative: %v", got)
+	}
+}
+
+func TestAddJitter(t *testing.T) {
+	d := 100 * time.Millisecond
+	lo := d / 2
+	hi := d/2 + d
+
+	for range 1000 {
+		jittered := addJitter(d)
+		if jittered < lo || jittered > hi {
+			t.Errorf("addJitter(%v) = %v, want in [%v, %v]", d, jittered, lo, hi)
+		}
+	}
+
+	if got := addJitter(0); got != 0 {
+		t.Errorf("addJitter(0) = %v, want 0", got)
+	}
+	if got := addJitter(-time.Second); got != -time.Second {
+		t.Errorf("addJitter(-1s) = %v, want -1s", got)
 	}
 }
