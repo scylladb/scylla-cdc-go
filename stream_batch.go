@@ -2,6 +2,9 @@ package scyllacdc
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -91,6 +94,9 @@ func (sbr *streamBatchReader) run(ctx context.Context) (err error) {
 
 	wnd := sbr.getPollWindow()
 
+	tableMissingRetryLimit := sbr.config.Advanced.TableMissingRetryLimit
+	tableMissingRetries := 0
+
 outer:
 	for {
 		var err error
@@ -102,8 +108,17 @@ outer:
 			var iter *changeRowIterator
 			iter, err = crq.queryRange(wnd.begin, wnd.end)
 			if err != nil {
-				sbr.config.Logger.Printf("error while sending a query (will retry): %s", err)
+				if isTableMissingError(err) {
+					tableMissingRetries++
+					if tableMissingRetries > tableMissingRetryLimit {
+						return fmt.Errorf("table %s.%s no longer exists: %w", sbr.keyspaceName, sbr.tableName, err)
+					}
+					sbr.config.Logger.Printf("table not found (attempt %d/%d, will retry): %s", tableMissingRetries, tableMissingRetryLimit, err)
+				} else {
+					sbr.config.Logger.Printf("error while sending a query (will retry): %s", err)
+				}
 			} else {
+				tableMissingRetries = 0
 				rowCount, consumerErr := sbr.processRows(ctx, iter)
 				if err = iter.Close(); err != nil {
 					sbr.config.Logger.Printf("error while querying (will retry): %s", err)
@@ -306,4 +321,30 @@ func (sbr *streamBatchReader) close(processUntil gocql.UUID) {
 
 func (sbr *streamBatchReader) stopNow() {
 	sbr.close(gocql.UUID{})
+}
+
+// isTableMissingError returns true if the error indicates that the table
+// no longer exists. This covers gocql metadata cache errors
+// (ErrNotFound, ErrKeyspaceDoesNotExist), CQL-level errors returned
+// by the server (ErrCodeInvalid with "no such table" or "unconfigured table"),
+// and errors from the local metadata lookup.
+func isTableMissingError(err error) bool {
+	if errors.Is(err, gocql.ErrNotFound) || errors.Is(err, gocql.ErrKeyspaceDoesNotExist) {
+		return true
+	}
+
+	var reqErr gocql.RequestError
+	if errors.As(err, &reqErr) && reqErr.Code() == gocql.ErrCodeInvalid {
+		msg := reqErr.Message()
+		if strings.Contains(msg, "no such table") ||
+			strings.Contains(msg, "unconfigured table") ||
+			strings.Contains(msg, "does not exist") {
+			return true
+		}
+	}
+
+	msg := err.Error()
+	return strings.Contains(msg, "no such table") ||
+		strings.Contains(msg, "unconfigured table") ||
+		strings.Contains(msg, "does not exist")
 }

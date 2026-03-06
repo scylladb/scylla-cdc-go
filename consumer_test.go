@@ -2,6 +2,7 @@ package scyllacdc_test
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -292,5 +293,86 @@ func TestConsumerHonorsTableTTL(t *testing.T) {
 			t.Errorf("timestamp of empty event %s not in expected range %s, %s",
 				tstp.Time(), acceptableStart, acceptableEnd)
 		}
+	}
+}
+
+// notifyingConsumer wraps recordingConsumer and signals a channel when
+// CreateChangeConsumer is called, indicating the reader has started polling.
+type notifyingConsumer struct {
+	recordingConsumer
+	started   chan struct{}
+	startOnce sync.Once
+}
+
+func (nc *notifyingConsumer) CreateChangeConsumer(ctx context.Context, input scyllacdc.CreateChangeConsumerInput) (scyllacdc.ChangeConsumer, error) {
+	nc.startOnce.Do(func() { close(nc.started) })
+	return nc.recordingConsumer.CreateChangeConsumer(ctx, input)
+}
+
+func TestConsumerReturnsErrorWhenTableIsDropped(t *testing.T) {
+	consumer := &notifyingConsumer{
+		recordingConsumer: recordingConsumer{mu: &sync.Mutex{}},
+		started:           make(chan struct{}),
+	}
+
+	adv := scyllacdc.AdvancedReaderConfig{
+		ChangeAgeLimit:         -time.Millisecond,
+		PostNonEmptyQueryDelay: 100 * time.Millisecond,
+		PostEmptyQueryDelay:    100 * time.Millisecond,
+		PostFailedQueryDelay:   100 * time.Millisecond,
+		QueryTimeWindowSize:    100 * time.Millisecond,
+		ConfidenceWindowSize:   time.Millisecond,
+		TableMissingRetryLimit: 3,
+	}
+
+	// Configure a session
+	address := testutils.GetSourceClusterContactPoint()
+	keyspaceName := testutils.CreateUniqueKeyspace(t, address, false)
+	cluster := gocql.NewCluster(address)
+	cluster.Keyspace = keyspaceName
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	execQuery(t, session, "CREATE TABLE tbl (pk int PRIMARY KEY, v int) WITH cdc = {'enabled': true}")
+
+	cfg := &scyllacdc.ReaderConfig{
+		Session:               session,
+		ChangeConsumerFactory: consumer,
+		TableNames:            []string{keyspaceName + ".tbl"},
+		Advanced:              adv,
+		Logger:                log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile),
+	}
+
+	reader, err := scyllacdc.NewReader(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errC := make(chan error, 1)
+	go func() { errC <- reader.Run(context.Background()) }()
+
+	// Wait for the reader to start polling
+	select {
+	case <-consumer.started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("reader did not start polling within 30 seconds")
+	}
+
+	// Drop the table while the reader is running
+	execQuery(t, session, fmt.Sprintf("DROP TABLE %s.tbl", keyspaceName))
+
+	// The reader should return an error within a reasonable time, not hang forever
+	select {
+	case err := <-errC:
+		if err == nil {
+			t.Fatal("expected an error after dropping the table, got nil")
+		}
+		t.Logf("reader returned expected error: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("reader did not return an error within 30 seconds after table was dropped")
 	}
 }

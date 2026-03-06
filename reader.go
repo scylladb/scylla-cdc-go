@@ -132,6 +132,16 @@ type AdvancedReaderConfig struct {
 	// If the parameter is left as 0, the library will automatically adjust
 	// the size of the restriction window.
 	ChangeAgeLimit time.Duration
+
+	// TableMissingRetryLimit defines the maximum number of consecutive
+	// poll iterations that can fail with a "table missing" error before
+	// the reader gives up and returns an error. This is useful during
+	// rolling schema changes where the table may temporarily appear
+	// missing.
+	//
+	// If the parameter is left as 0, the default value of 30 is used.
+	// Setting it to 0 is not possible; use 1 to effectively disable retries.
+	TableMissingRetryLimit int
 }
 
 func (arc *AdvancedReaderConfig) setDefaults() {
@@ -148,6 +158,10 @@ func (arc *AdvancedReaderConfig) setDefaults() {
 
 	setIfZero(&arc.QueryTimeWindowSize, 30*time.Second)
 	setIfZero(&arc.ChangeAgeLimit, 1*time.Minute)
+
+	if arc.TableMissingRetryLimit == 0 {
+		arc.TableMissingRetryLimit = 30
+	}
 }
 
 // Copy makes a shallow copy of the ReaderConfig.
