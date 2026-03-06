@@ -29,11 +29,6 @@ const (
 
 	getGenerationTimesQueryForTablets = "SELECT timestamp FROM " + timestampsTableForTablets + " WHERE keyspace_name = ? AND table_name = ?"
 	getGenerationQueryForTablets      = "SELECT stream_id FROM " + streamsTableForTablets + " WHERE keyspace_name = ? AND table_name = ? AND timestamp = ? AND stream_state = ?"
-
-	// TODO: Switch to a model which reacts to cluster state changes
-	// and forces a refresh when all worker goroutines did not report any
-	// changes for some time
-	generationFetchPeriod time.Duration = 15 * time.Second
 )
 
 // follows the stream_state column in system.cdc_streams
@@ -82,6 +77,13 @@ type generationFetcher struct {
 	stopCh       chan struct{}
 
 	source generationSource
+
+	consecutiveFetchFailures int
+
+	fetchPeriod    time.Duration
+	maxFetchPeriod time.Duration
+
+	clusterSizeFunc func() (int, error)
 }
 
 func newGenerationFetcher(
@@ -89,6 +91,8 @@ func newGenerationFetcher(
 	startFrom time.Time,
 	logger Logger,
 	tableNames []string,
+	fetchPeriod time.Duration,
+	maxFetchPeriod time.Duration,
 ) (*generationFetcher, error) {
 	source, err := chooseGenerationSource(session, logger, tableNames)
 	if err != nil {
@@ -105,6 +109,18 @@ func newGenerationFetcher(
 		refreshCh:    make(chan struct{}, 1),
 
 		source: source,
+
+		fetchPeriod:    fetchPeriod,
+		maxFetchPeriod: maxFetchPeriod,
+
+		clusterSizeFunc: func() (int, error) {
+			var size int
+			err := session.Query("SELECT COUNT(*) FROM system.peers").Scan(&size)
+			if err != nil {
+				return 0, err
+			}
+			return size + 1, nil
+		},
 	}
 	return gf, nil
 }
@@ -179,11 +195,17 @@ func (gf *generationFetcher) Run(ctx context.Context) error {
 
 outer:
 	for {
-		// Generation processing can take some time, so start calculating
-		// the next poll time starting from now
-		waitC := time.After(generationFetchPeriod)
+		failed := gf.tryFetchGenerations()
 
-		gf.tryFetchGenerations()
+		var waitDuration time.Duration
+		if failed {
+			gf.consecutiveFetchFailures++
+			waitDuration = addJitter(backoffDelay(gf.fetchPeriod, gf.maxFetchPeriod, gf.consecutiveFetchFailures))
+		} else {
+			gf.consecutiveFetchFailures = 0
+			waitDuration = gf.fetchPeriod
+		}
+		waitC := time.After(waitDuration)
 
 		select {
 		// Give priority to the stop channel and the context
@@ -208,12 +230,12 @@ outer:
 	return nil
 }
 
-func (gf *generationFetcher) tryFetchGenerations() {
+func (gf *generationFetcher) tryFetchGenerations() (failed bool) {
 	// Decide on the consistency to use
 	size, err := gf.getClusterSize()
 	if err != nil {
 		gf.logger.Printf("an error occurred while determining cluster size: %s", err)
-		return
+		return true
 	}
 
 	consistency := gocql.One
@@ -233,7 +255,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 	times, err := gf.source.getGenerationTimes(consistency)
 	if err != nil {
 		gf.logger.Printf("an error occurred while fetching generation times: %s", err)
-		return
+		return true
 	}
 	sort.Sort(timeList(times))
 
@@ -241,6 +263,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 		streams, err := gf.source.getGeneration(t, consistency)
 		if err != nil {
 			gf.logger.Printf("an error occurred while fetching generation streams for %s: %s", t, err)
+			failed = true
 			return true
 		}
 		gen := &generation{t, streams}
@@ -276,11 +299,11 @@ func (gf *generationFetcher) tryFetchGenerations() {
 		if gf.lastTime.Before(t) {
 
 			if shouldBreak := maybePushFirst(); shouldBreak {
-				return
+				return failed
 			}
 
 			if shouldBreak := fetchAndPush(t); shouldBreak {
-				return
+				return failed
 			}
 			gf.lastTime = t
 		}
@@ -288,6 +311,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 	}
 
 	_ = maybePushFirst()
+	return failed
 }
 
 func (gf *generationFetcher) Get(ctx context.Context) (*generation, error) {
@@ -321,15 +345,8 @@ func (gf *generationFetcher) pushGeneration(gen *generation) (shouldStop bool) {
 	}
 }
 
-// Unfortunately, gocql does not expose information about the cluster,
-// therefore we need to poll system.peers manually
 func (gf *generationFetcher) getClusterSize() (int, error) {
-	var size int
-	err := gf.session.Query("SELECT COUNT(*) FROM system.peers").Scan(&size)
-	if err != nil {
-		return 0, err
-	}
-	return size + 1, nil
+	return gf.clusterSizeFunc()
 }
 
 type generationSource interface {

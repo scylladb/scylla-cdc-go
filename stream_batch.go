@@ -11,6 +11,12 @@ import (
 	"github.com/gocql/gocql"
 )
 
+// cdcIterator abstracts iteration over CDC log query results.
+type cdcIterator interface {
+	Next() (cdcChangeBatchCols, *ChangeRow)
+	Close() error
+}
+
 type streamBatchReader struct {
 	config         *ReaderConfig
 	generationTime time.Time
@@ -26,6 +32,11 @@ type streamBatchReader struct {
 	perStreamProgress map[string]gocql.UUID
 
 	interruptCh chan struct{}
+
+	consecutiveQueryFailures int
+
+	// queryRangeFunc overrides the default query mechanism. Used for testing.
+	queryRangeFunc func(begin, end gocql.UUID) (cdcIterator, error)
 }
 
 func newStreamBatchReader(
@@ -90,7 +101,13 @@ func (sbr *streamBatchReader) run(ctx context.Context) (err error) {
 		sbr.consumers[string(s)] = consumer
 	}
 
-	crq := newChangeRowQuerier(sbr.config.Session, sbr.streams, sbr.keyspaceName, sbr.tableName, sbr.config.Consistency)
+	queryRange := sbr.queryRangeFunc
+	if queryRange == nil {
+		crq := newChangeRowQuerier(sbr.config.Session, sbr.streams, sbr.keyspaceName, sbr.tableName, sbr.config.Consistency)
+		queryRange = func(begin, end gocql.UUID) (cdcIterator, error) {
+			return crq.queryRange(begin, end)
+		}
+	}
 
 	wnd := sbr.getPollWindow()
 
@@ -105,8 +122,8 @@ outer:
 		windowProcessingStartTime := time.Now()
 
 		if CompareTimeUUID(wnd.begin, wnd.end) < 0 {
-			var iter *changeRowIterator
-			iter, err = crq.queryRange(wnd.begin, wnd.end)
+			var iter cdcIterator
+			iter, err = queryRange(wnd.begin, wnd.end)
 			if err != nil {
 				if isTableMissingError(err) {
 					tableMissingRetries++
@@ -149,10 +166,17 @@ outer:
 		var delay time.Duration
 		switch {
 		case err != nil:
-			delay = sbr.config.Advanced.PostFailedQueryDelay
+			sbr.consecutiveQueryFailures++
+			delay = addJitter(backoffDelay(
+				sbr.config.Advanced.PostFailedQueryDelay,
+				sbr.config.Advanced.MaxPostFailedQueryDelay,
+				sbr.consecutiveQueryFailures,
+			))
 		case hadRows:
+			sbr.consecutiveQueryFailures = 0
 			delay = sbr.config.Advanced.PostNonEmptyQueryDelay
 		default:
+			sbr.consecutiveQueryFailures = 0
 			delay = sbr.config.Advanced.PostEmptyQueryDelay
 		}
 
@@ -256,7 +280,7 @@ func (sbr *streamBatchReader) getConfidenceLimitPoint() time.Time {
 	return time.Now().Add(-sbr.config.Advanced.ConfidenceWindowSize)
 }
 
-func (sbr *streamBatchReader) processRows(ctx context.Context, iter *changeRowIterator) (int, error) {
+func (sbr *streamBatchReader) processRows(ctx context.Context, iter cdcIterator) (int, error) {
 	rowCount := 0
 	var change Change
 
