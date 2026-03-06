@@ -518,15 +518,14 @@ func isTableInSchema(session *gocql.Session, tableName string) (bool, error) {
 	keyspace := decomposed[0]
 	table := decomposed[1]
 
-	meta, err := session.KeyspaceMetadata(keyspace)
-	if err == gocql.ErrKeyspaceDoesNotExist {
+	_, err := session.TableMetadata(keyspace, table)
+	if errors.Is(err, gocql.ErrNotFound) || errors.Is(err, gocql.ErrKeyspaceDoesNotExist) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
 
-	_, ok := meta.Tables[table]
-	return ok, nil
+	return true, nil
 }
 
 func usesTablets(session *gocql.Session, tableName string) (bool, error) {
