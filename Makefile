@@ -114,7 +114,7 @@ endif
 .PHONY: test
 test: install-docker-compose start-docker-environment
 	@echo "Running tests"
-	@go test -v ./...
+	@go test -v -timeout 30m ./...
 
 .PHONY: build
 build:
