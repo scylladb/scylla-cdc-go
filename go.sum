@@ -10,6 +10,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/scylladb/gocql v1.17.0 h1:sSjNTgSoC90+1XYXOMeWsQ8+AZbFYQWcspuScmUT53E=
 github.com/scylladb/gocql v1.17.0/go.mod h1:0VgVuYnAPOoYN17KXkYdWDxhL2/rH3V3vOisPMngpAw=
+github.com/scylladb/gocql v1.17.3 h1:dmtjGn9asID97piyuz85PEVHEIHm9H9GyMti1+RMObo=
+github.com/scylladb/gocql v1.17.3/go.mod h1:kadKEoGTS/dMUXscNhxR8ORMyx1grygMCNppaacjkh8=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 go.yaml.in/yaml/v2 v2.4.3 h1:6gvOSjQoTB3vt1l+CU+tSyi/HOjfOjRLJ4YwYZGwRO0=
