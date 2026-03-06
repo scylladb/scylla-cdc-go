@@ -104,11 +104,21 @@ type AdvancedReaderConfig struct {
 
 	// If the library tries to read from the CDC log and the read operation
 	// fails, it will wait some time before attempting to read again. This
-	// parameter specifies the length of the delay.
+	// parameter specifies the initial length of the delay. On consecutive
+	// failures, the delay increases exponentially up to MaxPostFailedQueryDelay.
 	//
 	// If the parameter is left as 0, the library will automatically adjust
 	// the length of the delay.
 	PostFailedQueryDelay time.Duration
+
+	// MaxPostFailedQueryDelay defines the upper bound for the exponential
+	// backoff delay after consecutive failed queries. The delay starts at
+	// PostFailedQueryDelay and doubles on each consecutive failure, up to
+	// this maximum.
+	//
+	// If the parameter is left as 0, the library will automatically choose
+	// a default maximum delay.
+	MaxPostFailedQueryDelay time.Duration
 
 	// Changes are queried using select statements with restriction on the time
 	// those changes appeared. The restriction is bounding the time from both
@@ -133,6 +143,21 @@ type AdvancedReaderConfig struct {
 	// the size of the restriction window.
 	ChangeAgeLimit time.Duration
 
+	// PostGenerationFetchDelay defines the base polling interval for
+	// fetching new CDC generations from the cluster. On consecutive
+	// failures, this interval increases exponentially up to
+	// MaxPostGenerationFetchDelay.
+	//
+	// If the parameter is left as 0, the default value of 15 seconds is used.
+	PostGenerationFetchDelay time.Duration
+
+	// MaxPostGenerationFetchDelay defines the upper bound for the
+	// exponential backoff when polling for new CDC generations fails
+	// consecutively.
+	//
+	// If the parameter is left as 0, the default value of 5 minutes is used.
+	MaxPostGenerationFetchDelay time.Duration
+
 	// TableMissingRetryLimit defines the maximum number of consecutive
 	// poll iterations that can fail with a "table missing" error before
 	// the reader gives up and returns an error. This is useful during
@@ -155,9 +180,13 @@ func (arc *AdvancedReaderConfig) setDefaults() {
 	setIfZero(&arc.PostNonEmptyQueryDelay, 10*time.Second)
 	setIfZero(&arc.PostEmptyQueryDelay, 30*time.Second)
 	setIfZero(&arc.PostFailedQueryDelay, 1*time.Second)
+	setIfZero(&arc.MaxPostFailedQueryDelay, 30*time.Second)
 
 	setIfZero(&arc.QueryTimeWindowSize, 30*time.Second)
 	setIfZero(&arc.ChangeAgeLimit, 1*time.Minute)
+
+	setIfZero(&arc.PostGenerationFetchDelay, 15*time.Second)
+	setIfZero(&arc.MaxPostGenerationFetchDelay, 5*time.Minute)
 
 	if arc.TableMissingRetryLimit == 0 {
 		arc.TableMissingRetryLimit = 30
@@ -203,6 +232,8 @@ func NewReader(ctx context.Context, config *ReaderConfig) (*Reader, error) {
 		readFrom,
 		config.Logger,
 		config.TableNames,
+		config.Advanced.PostGenerationFetchDelay,
+		config.Advanced.MaxPostGenerationFetchDelay,
 	)
 	if err != nil {
 		return nil, err
