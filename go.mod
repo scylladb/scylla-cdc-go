@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/gocql/gocql v1.17.0
-	golang.org/x/sync v0.19.0
+	golang.org/x/sync v0.20.0
 )
 
 require (
