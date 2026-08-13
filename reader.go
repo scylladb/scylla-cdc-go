@@ -2,7 +2,6 @@ package scyllacdc
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -105,11 +104,21 @@ type AdvancedReaderConfig struct {
 
 	// If the library tries to read from the CDC log and the read operation
 	// fails, it will wait some time before attempting to read again. This
-	// parameter specifies the length of the delay.
+	// parameter specifies the initial length of the delay. On consecutive
+	// failures, the delay increases exponentially up to MaxPostFailedQueryDelay.
 	//
 	// If the parameter is left as 0, the library will automatically adjust
 	// the length of the delay.
 	PostFailedQueryDelay time.Duration
+
+	// MaxPostFailedQueryDelay defines the upper bound for the exponential
+	// backoff delay after consecutive failed queries. The delay starts at
+	// PostFailedQueryDelay and doubles on each consecutive failure, up to
+	// this maximum.
+	//
+	// If the parameter is left as 0, the library will automatically choose
+	// a default maximum delay.
+	MaxPostFailedQueryDelay time.Duration
 
 	// Changes are queried using select statements with restriction on the time
 	// those changes appeared. The restriction is bounding the time from both
@@ -133,6 +142,31 @@ type AdvancedReaderConfig struct {
 	// If the parameter is left as 0, the library will automatically adjust
 	// the size of the restriction window.
 	ChangeAgeLimit time.Duration
+
+	// PostGenerationFetchDelay defines the base polling interval for
+	// fetching new CDC generations from the cluster. On consecutive
+	// failures, this interval increases exponentially up to
+	// MaxPostGenerationFetchDelay.
+	//
+	// If the parameter is left as 0, the default value of 15 seconds is used.
+	PostGenerationFetchDelay time.Duration
+
+	// MaxPostGenerationFetchDelay defines the upper bound for the
+	// exponential backoff when polling for new CDC generations fails
+	// consecutively.
+	//
+	// If the parameter is left as 0, the default value of 5 minutes is used.
+	MaxPostGenerationFetchDelay time.Duration
+
+	// TableMissingRetryLimit defines the maximum number of consecutive
+	// poll iterations that can fail with a "table missing" error before
+	// the reader gives up and returns an error. This is useful during
+	// rolling schema changes where the table may temporarily appear
+	// missing.
+	//
+	// If the parameter is left as 0, the default value of 30 is used.
+	// Setting it to 0 is not possible; use 1 to effectively disable retries.
+	TableMissingRetryLimit int
 }
 
 func (arc *AdvancedReaderConfig) setDefaults() {
@@ -146,9 +180,17 @@ func (arc *AdvancedReaderConfig) setDefaults() {
 	setIfZero(&arc.PostNonEmptyQueryDelay, 10*time.Second)
 	setIfZero(&arc.PostEmptyQueryDelay, 30*time.Second)
 	setIfZero(&arc.PostFailedQueryDelay, 1*time.Second)
+	setIfZero(&arc.MaxPostFailedQueryDelay, 30*time.Second)
 
 	setIfZero(&arc.QueryTimeWindowSize, 30*time.Second)
 	setIfZero(&arc.ChangeAgeLimit, 1*time.Minute)
+
+	setIfZero(&arc.PostGenerationFetchDelay, 15*time.Second)
+	setIfZero(&arc.MaxPostGenerationFetchDelay, 5*time.Minute)
+
+	if arc.TableMissingRetryLimit == 0 {
+		arc.TableMissingRetryLimit = 30
+	}
 }
 
 // Copy makes a shallow copy of the ReaderConfig.
@@ -189,6 +231,9 @@ func NewReader(ctx context.Context, config *ReaderConfig) (*Reader, error) {
 		config.Session,
 		readFrom,
 		config.Logger,
+		config.TableNames,
+		config.Advanced.PostGenerationFetchDelay,
+		config.Advanced.MaxPostGenerationFetchDelay,
 	)
 	if err != nil {
 		return nil, err
@@ -287,9 +332,14 @@ func (r *Reader) Run(ctx context.Context) error {
 			}
 
 			// Start batch readers for this generation
-			split := r.splitStreams(gen.streams)
+			// Use pre-grouped streams from generation fetcher
+			split := gen.streams
+			totalStreams := 0
+			for _, group := range split {
+				totalStreams += len(group)
+			}
 
-			l.Printf("grouped %d streams into %d batches", len(gen.streams), len(split))
+			l.Printf("grouped %d streams into %d batches", totalStreams, len(split))
 
 			genErrG, genCtx := errgroup.WithContext(runCtx)
 
@@ -400,45 +450,4 @@ func (r *Reader) Stop() {
 func (r *Reader) StopAt(at time.Time) {
 	r.stopTime.Store(at)
 	close(r.stoppedCh)
-}
-
-func (r *Reader) splitStreams(streams []StreamID) [][]StreamID {
-	vnodesIdxToStreams := make(map[int64][]StreamID, 0)
-	for _, stream := range streams {
-		idx := getVnodeIndexForStream(stream)
-		vnodesIdxToStreams[idx] = append(vnodesIdxToStreams[idx], stream)
-	}
-
-	groups := make([][]StreamID, 0)
-
-	// Idx -1 means that we don't know the vnode for given stream,
-	// therefore we will put those streams into a separate group
-	for _, stream := range vnodesIdxToStreams[-1] {
-		groups = append(groups, []StreamID{stream})
-	}
-	delete(vnodesIdxToStreams, -1)
-
-	for _, group := range vnodesIdxToStreams {
-		groups = append(groups, group)
-	}
-	return groups
-}
-
-// Computes vnode index from given stream ID.
-// Returns -1 if the stream ID format is unrecognized.
-func getVnodeIndexForStream(streamID StreamID) int64 {
-	if len(streamID) != 16 {
-		// Don't know how to handle other sizes
-		return -1
-	}
-
-	lowerQword := binary.BigEndian.Uint64(streamID[8:16])
-	version := lowerQword & (1<<4 - 1)
-	if version != 1 {
-		// Unrecognized version
-		return -1
-	}
-
-	vnodeIdx := (lowerQword >> 4) & (1<<22 - 1)
-	return int64(vnodeIdx)
 }

@@ -427,7 +427,7 @@ func (c *ChangeRow) String() string {
 		b.WriteString(info.Name)
 		b.WriteString(":")
 		if hasValue {
-			b.WriteString(fmt.Sprintf("%v", v))
+			fmt.Fprintf(&b, "%v", v)
 		} else {
 			b.WriteString("nil")
 		}
@@ -436,13 +436,13 @@ func (c *ChangeRow) String() string {
 			b.WriteString(", cdc$deleted_")
 			b.WriteString(info.Name)
 			b.WriteString(":")
-			b.WriteString(fmt.Sprintf("%t", isDeleted))
+			fmt.Fprintf(&b, "%t", isDeleted)
 		}
 		if hasDeletedElements {
 			b.WriteString(", cdc$deleted_elements_")
 			b.WriteString(info.Name)
 			b.WriteString(":")
-			b.WriteString(fmt.Sprintf("%v", deletedElements))
+			fmt.Fprintf(&b, "%v", deletedElements)
 		}
 	}
 
@@ -580,19 +580,38 @@ func newChangeRowQuerier(session *gocql.Session, streams []StreamID, keyspaceNam
 }
 
 func (crq *changeRowQuerier) queryRange(start, end gocql.UUID) (*changeRowIterator, error) {
-	// We need metadata to check if there are any tuples
-	kmeta, err := crq.session.KeyspaceMetadata(crq.keyspaceName)
+	colNames, tupleNames, err := crq.getCDCTableColumns()
 	if err != nil {
 		return nil, err
 	}
 
-	tmeta, ok := kmeta.Tables[crq.tableName+cdcTableSuffix]
-	if !ok {
-		return nil, fmt.Errorf("no such table: %s.%s", crq.keyspaceName, crq.tableName)
+	queryStr := fmt.Sprintf(
+		"SELECT %s FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" <= ? BYPASS CACHE",
+		strings.Join(colNames, ", "),
+		crq.keyspaceName,
+		crq.tableName,
+		cdcTableSuffix,
+		crq.pkCondition,
+	)
+
+	crq.bindArgs[len(crq.bindArgs)-2] = start
+	crq.bindArgs[len(crq.bindArgs)-1] = end
+
+	iter := crq.session.Query(queryStr, crq.bindArgs...).Consistency(crq.consistency).Iter()
+	return newChangeRowIterator(iter, tupleNames)
+}
+
+// getCDCTableColumns fetches column metadata for the CDC log table.
+// Note: session.TableMetadata does not accept a context (gocql limitation),
+// so this call cannot be cancelled if the metadata fetch hangs.
+func (crq *changeRowQuerier) getCDCTableColumns() (colNames, tupleNames []string, err error) {
+	cdcTable := crq.tableName + cdcTableSuffix
+
+	tmeta, err := crq.session.TableMetadata(crq.keyspaceName, cdcTable)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	var colNames []string
-	var tupleNames []string
 	for _, col := range tmeta.Columns {
 		var ct interface{} = col.Type
 		var ctStr string
@@ -616,20 +635,7 @@ func (crq *changeRowQuerier) queryRange(start, end gocql.UUID) (*changeRowIterat
 		}
 	}
 
-	queryStr := fmt.Sprintf(
-		"SELECT %s FROM %s.%s%s WHERE %s AND \"cdc$time\" > ? AND \"cdc$time\" <= ? BYPASS CACHE",
-		strings.Join(colNames, ", "),
-		crq.keyspaceName,
-		crq.tableName,
-		cdcTableSuffix,
-		crq.pkCondition,
-	)
-
-	crq.bindArgs[len(crq.bindArgs)-2] = start
-	crq.bindArgs[len(crq.bindArgs)-1] = end
-
-	iter := crq.session.Query(queryStr, crq.bindArgs...).Consistency(crq.consistency).Iter()
-	return newChangeRowIterator(iter, tupleNames)
+	return colNames, tupleNames, nil
 }
 
 // For a given range, returns the cdc$time of the earliest rows for each stream.

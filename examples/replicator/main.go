@@ -272,18 +272,12 @@ func (rf *replicatorFactory) CreateChangeConsumer(
 		return nil, fmt.Errorf("table name is not fully qualified: %s", input.TableName)
 	}
 
-	kmeta, err := rf.destinationSession.KeyspaceMetadata(splitTableName[0])
+	tmeta, err := rf.destinationSession.TableMetadata(splitTableName[0], splitTableName[1])
 	if err != nil {
-		rf.destinationSession.Close()
 		return nil, err
 	}
-	tmeta, ok := kmeta.Tables[splitTableName[1]]
-	if !ok {
-		rf.destinationSession.Close()
-		return nil, fmt.Errorf("table %s does not exist", input.TableName)
-	}
 
-	return NewDeltaReplicator(ctx, rf.destinationSession, kmeta, tmeta, rf.consistency, rf.rowsRead, input.StreamID, input.ProgressReporter, rf.logger)
+	return NewDeltaReplicator(ctx, rf.destinationSession, tmeta, rf.consistency, rf.rowsRead, input.StreamID, input.ProgressReporter, rf.logger)
 }
 
 type DeltaReplicator struct {
@@ -311,7 +305,6 @@ type DeltaReplicator struct {
 func NewDeltaReplicator(
 	ctx context.Context,
 	session *gocql.Session,
-	kmeta *gocql.KeyspaceMetadata,
 	meta *gocql.TableMetadata,
 	consistency gocql.Consistency,
 	count *int64,

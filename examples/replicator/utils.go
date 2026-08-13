@@ -208,9 +208,10 @@ func parseTypeList(str string) []TypeInfo {
 			continue
 		}
 
-		if r == '<' {
+		switch r {
+		case '<':
 			level++
-		} else if r == '>' {
+		case '>':
 			level--
 		}
 		builder.WriteRune(r)

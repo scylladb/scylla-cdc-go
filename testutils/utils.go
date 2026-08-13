@@ -42,7 +42,7 @@ func GetDestinationClusterContactPoint() string {
 	return uri
 }
 
-func CreateKeyspace(t *testing.T, contactPoint, keyspaceName string) {
+func CreateKeyspace(t *testing.T, contactPoint, keyspaceName string, tabletsEnabled bool) {
 	t.Helper()
 
 	cluster := gocql.NewCluster(contactPoint)
@@ -52,7 +52,14 @@ func CreateKeyspace(t *testing.T, contactPoint, keyspaceName string) {
 	}
 
 	defer session.Close()
-	err = session.Query(fmt.Sprintf("CREATE KEYSPACE %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}", keyspaceName)).Exec()
+
+	tabletsOption := "false"
+	if tabletsEnabled {
+		tabletsOption = "true"
+	}
+
+	query := fmt.Sprintf("CREATE KEYSPACE %s WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': '1'} AND tablets={'enabled': %s}", keyspaceName, tabletsOption)
+	err = session.Query(query).Exec()
 	if err != nil {
 		t.Fatalf("failed to create keyspace %s: %v", keyspaceName, err)
 	}
@@ -61,12 +68,25 @@ func CreateKeyspace(t *testing.T, contactPoint, keyspaceName string) {
 	if err != nil {
 		t.Fatalf("awaiting schema agreement failed: %v", err)
 	}
+
+	// Check if CDC is supported by attempting to create a test table with CDC enabled
+	testTableName := "cdc_support_test"
+	cdcTestQuery := fmt.Sprintf("CREATE TABLE %s.%s (pk int PRIMARY KEY, v int) WITH cdc = {'enabled': true}", keyspaceName, testTableName)
+	err = session.Query(cdcTestQuery).Exec()
+	if err != nil {
+		t.Skipf("CDC is not supported on this cluster: %v", err)
+		return
+	}
+
+	// Clean up the test table
+	dropTestQuery := fmt.Sprintf("DROP TABLE %s.%s", keyspaceName, testTableName)
+	_ = session.Query(dropTestQuery).Exec() // Ignore errors on cleanup
 }
 
-func CreateUniqueKeyspace(t *testing.T, contactPoint string) string {
+func CreateUniqueKeyspace(t *testing.T, contactPoint string, tabletsEnabled bool) string {
 	t.Helper()
 
 	keyspaceName := GetUniqueName("test_keyspace")
-	CreateKeyspace(t, contactPoint, keyspaceName)
+	CreateKeyspace(t, contactPoint, keyspaceName, tabletsEnabled)
 	return keyspaceName
 }

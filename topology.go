@@ -2,6 +2,7 @@ package scyllacdc
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -23,15 +24,23 @@ const (
 	timestampsTableSince4_4 = "system_distributed.cdc_generation_timestamps"
 	streamsTableSince4_4    = "system_distributed.cdc_streams_descriptions_v2"
 
-	// TODO: Switch to a model which reacts to cluster state changes
-	// and forces a refresh when all worker goroutines did not report any
-	// changes for some time
-	generationFetchPeriod time.Duration = 15 * time.Second
+	timestampsTableForTablets = "system.cdc_timestamps"
+	streamsTableForTablets    = "system.cdc_streams"
+
+	getGenerationTimesQueryForTablets = "SELECT timestamp FROM " + timestampsTableForTablets + " WHERE keyspace_name = ? AND table_name = ?"
+	getGenerationQueryForTablets      = "SELECT stream_id FROM " + streamsTableForTablets + " WHERE keyspace_name = ? AND table_name = ? AND timestamp = ? AND stream_state = ?"
+)
+
+// follows the stream_state column in system.cdc_streams
+const (
+	StreamStateCurrent = 0
+	StreamStateClosed  = 1
+	StreamStateOpened  = 2
 )
 
 type generation struct {
 	startTime time.Time
-	streams   []StreamID
+	streams   [][]StreamID
 }
 
 // StreamID represents an ID of a stream from a CDC log (cdc$time column).
@@ -68,14 +77,24 @@ type generationFetcher struct {
 	stopCh       chan struct{}
 
 	source generationSource
+
+	consecutiveFetchFailures int
+
+	fetchPeriod    time.Duration
+	maxFetchPeriod time.Duration
+
+	clusterSizeFunc func() (int, error)
 }
 
 func newGenerationFetcher(
 	session *gocql.Session,
 	startFrom time.Time,
 	logger Logger,
+	tableNames []string,
+	fetchPeriod time.Duration,
+	maxFetchPeriod time.Duration,
 ) (*generationFetcher, error) {
-	source, err := chooseGenerationSource(session, logger)
+	source, err := chooseGenerationSource(session, logger, tableNames)
 	if err != nil {
 		return nil, fmt.Errorf("failed to detect version of the generation tables used by the cluster: %v", err)
 	}
@@ -90,11 +109,50 @@ func newGenerationFetcher(
 		refreshCh:    make(chan struct{}, 1),
 
 		source: source,
+
+		fetchPeriod:    fetchPeriod,
+		maxFetchPeriod: maxFetchPeriod,
+
+		clusterSizeFunc: func() (int, error) {
+			var size int
+			err := session.Query("SELECT COUNT(*) FROM system.peers").Scan(&size)
+			if err != nil {
+				return 0, err
+			}
+			return size + 1, nil
+		},
 	}
 	return gf, nil
 }
 
-func chooseGenerationSource(session *gocql.Session, logger Logger) (generationSource, error) {
+func chooseGenerationSource(session *gocql.Session, logger Logger, tableNames []string) (generationSource, error) {
+	anyUsesTablets := false
+	for _, tableName := range tableNames {
+		tableUsesTablets, err := usesTablets(session, tableName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine if table %s uses tablets-based CDC: %v", tableName, err)
+		}
+		anyUsesTablets = anyUsesTablets || tableUsesTablets
+	}
+
+	if anyUsesTablets {
+		if len(tableNames) > 1 {
+			return nil, errors.New("cannot use multiple tables when at least one of them uses tablets-based CDC")
+		}
+		decomposed := strings.SplitN(tableNames[0], ".", 2)
+		if len(decomposed) < 2 {
+			return nil, errors.New("unqualified table name passed to chooseGenerationSource")
+		}
+		keyspace := decomposed[0]
+		table := decomposed[1]
+		return &generationSourceTablets{
+			session:   session,
+			logger:    logger,
+			keyspace:  keyspace,
+			tableName: table,
+		}, nil
+	}
+
 	hasPre4_4, err := isTableInSchema(session, generationsTableNamePre4_4)
 	if err != nil {
 		return nil, err
@@ -137,11 +195,17 @@ func (gf *generationFetcher) Run(ctx context.Context) error {
 
 outer:
 	for {
-		// Generation processing can take some time, so start calculating
-		// the next poll time starting from now
-		waitC := time.After(generationFetchPeriod)
+		failed := gf.tryFetchGenerations()
 
-		gf.tryFetchGenerations()
+		var waitDuration time.Duration
+		if failed {
+			gf.consecutiveFetchFailures++
+			waitDuration = addJitter(backoffDelay(gf.fetchPeriod, gf.maxFetchPeriod, gf.consecutiveFetchFailures))
+		} else {
+			gf.consecutiveFetchFailures = 0
+			waitDuration = gf.fetchPeriod
+		}
+		waitC := time.After(waitDuration)
 
 		select {
 		// Give priority to the stop channel and the context
@@ -166,12 +230,12 @@ outer:
 	return nil
 }
 
-func (gf *generationFetcher) tryFetchGenerations() {
+func (gf *generationFetcher) tryFetchGenerations() (failed bool) {
 	// Decide on the consistency to use
 	size, err := gf.getClusterSize()
 	if err != nil {
 		gf.logger.Printf("an error occurred while determining cluster size: %s", err)
-		return
+		return true
 	}
 
 	consistency := gocql.One
@@ -191,7 +255,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 	times, err := gf.source.getGenerationTimes(consistency)
 	if err != nil {
 		gf.logger.Printf("an error occurred while fetching generation times: %s", err)
-		return
+		return true
 	}
 	sort.Sort(timeList(times))
 
@@ -199,6 +263,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 		streams, err := gf.source.getGeneration(t, consistency)
 		if err != nil {
 			gf.logger.Printf("an error occurred while fetching generation streams for %s: %s", t, err)
+			failed = true
 			return true
 		}
 		gen := &generation{t, streams}
@@ -234,11 +299,11 @@ func (gf *generationFetcher) tryFetchGenerations() {
 		if gf.lastTime.Before(t) {
 
 			if shouldBreak := maybePushFirst(); shouldBreak {
-				return
+				return failed
 			}
 
 			if shouldBreak := fetchAndPush(t); shouldBreak {
-				return
+				return failed
 			}
 			gf.lastTime = t
 		}
@@ -246,6 +311,7 @@ func (gf *generationFetcher) tryFetchGenerations() {
 	}
 
 	_ = maybePushFirst()
+	return failed
 }
 
 func (gf *generationFetcher) Get(ctx context.Context) (*generation, error) {
@@ -279,19 +345,12 @@ func (gf *generationFetcher) pushGeneration(gen *generation) (shouldStop bool) {
 	}
 }
 
-// Unfortunately, gocql does not expose information about the cluster,
-// therefore we need to poll system.peers manually
 func (gf *generationFetcher) getClusterSize() (int, error) {
-	var size int
-	err := gf.session.Query("SELECT COUNT(*) FROM system.peers").Scan(&size)
-	if err != nil {
-		return 0, err
-	}
-	return size + 1, nil
+	return gf.clusterSizeFunc()
 }
 
 type generationSource interface {
-	getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error)
+	getGeneration(genTime time.Time, consistency gocql.Consistency) ([][]StreamID, error)
 	getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error)
 
 	maybeUpgrade() (generationSource, error)
@@ -302,7 +361,7 @@ type generationSourcePre4_4 struct {
 	logger  Logger
 }
 
-func (gs *generationSourcePre4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+func (gs *generationSourcePre4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([][]StreamID, error) {
 	var streams []StreamID
 	err := gs.session.Query("SELECT streams FROM "+generationsTableNamePre4_4+" WHERE time = ?", genTime).
 		Consistency(consistency).
@@ -310,7 +369,7 @@ func (gs *generationSourcePre4_4) getGeneration(genTime time.Time, consistency g
 	if err != nil {
 		return nil, err
 	}
-	return streams, err
+	return splitStreamsByVnode(streams), nil
 }
 
 func (gs *generationSourcePre4_4) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
@@ -373,7 +432,7 @@ type generationSourceSince4_4 struct {
 	logger  Logger
 }
 
-func (gs *generationSourceSince4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([]StreamID, error) {
+func (gs *generationSourceSince4_4) getGeneration(genTime time.Time, consistency gocql.Consistency) ([][]StreamID, error) {
 	var streams []StreamID
 	iter := gs.session.Query("SELECT streams FROM "+streamsTableSince4_4+" WHERE time = ?", genTime).
 		Consistency(consistency).
@@ -387,7 +446,7 @@ func (gs *generationSourceSince4_4) getGeneration(genTime time.Time, consistency
 	if err := iter.Close(); err != nil {
 		return nil, err
 	}
-	return streams, nil
+	return splitStreamsByVnode(streams), nil
 }
 
 func (gs *generationSourceSince4_4) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
@@ -412,6 +471,58 @@ func (gs *generationSourceSince4_4) maybeUpgrade() (generationSource, error) {
 	return gs, nil
 }
 
+type generationSourceTablets struct {
+	session   *gocql.Session
+	logger    Logger
+	keyspace  string
+	tableName string
+}
+
+func (gs *generationSourceTablets) getGeneration(genTime time.Time, consistency gocql.Consistency) ([][]StreamID, error) {
+	var streams []StreamID
+	iter := gs.session.Query(getGenerationQueryForTablets, gs.keyspace, gs.tableName, genTime, StreamStateCurrent).
+		Consistency(consistency).
+		Iter()
+
+	var streamID StreamID
+	for iter.Scan(&streamID) {
+		streams = append(streams, streamID)
+	}
+
+	if err := iter.Close(); err != nil {
+		return nil, fmt.Errorf("failed to get generations for %s.%s: %w", gs.keyspace, gs.tableName, err)
+	}
+
+	// For tablets, put each stream in its own group. the vnode index is meaningless
+	groups := make([][]StreamID, 0, len(streams))
+	for _, stream := range streams {
+		groups = append(groups, []StreamID{stream})
+	}
+	return groups, nil
+}
+
+func (gs *generationSourceTablets) getGenerationTimes(consistency gocql.Consistency) ([]time.Time, error) {
+	iter := gs.session.Query(getGenerationTimesQueryForTablets, gs.keyspace, gs.tableName).
+		Consistency(consistency).
+		Iter()
+	var (
+		times    []time.Time
+		currTime time.Time
+	)
+	for iter.Scan(&currTime) {
+		times = append(times, currTime)
+	}
+	if err := iter.Close(); err != nil {
+		return nil, fmt.Errorf("failed to get timestamps for %s.%s: %w", gs.keyspace, gs.tableName, err)
+	}
+	return times, nil
+}
+
+func (gs *generationSourceTablets) maybeUpgrade() (generationSource, error) {
+	// No newer format is known for tablets
+	return gs, nil
+}
+
 // Takes a fully-qualified name of a table and returns if a table of given name
 // is in the schema.
 // Panics if the table name is not qualified, i.e. it does not contain a dot.
@@ -424,13 +535,84 @@ func isTableInSchema(session *gocql.Session, tableName string) (bool, error) {
 	keyspace := decomposed[0]
 	table := decomposed[1]
 
-	meta, err := session.KeyspaceMetadata(keyspace)
-	if err == gocql.ErrKeyspaceDoesNotExist {
+	_, err := session.TableMetadata(keyspace, table)
+	if errors.Is(err, gocql.ErrNotFound) || errors.Is(err, gocql.ErrKeyspaceDoesNotExist) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
 
-	_, ok := meta.Tables[table]
-	return ok, nil
+	return true, nil
+}
+
+func usesTablets(session *gocql.Session, tableName string) (bool, error) {
+	decomposed := strings.SplitN(tableName, ".", 2)
+	if len(decomposed) < 2 {
+		return false, errors.New("unqualified table name passed to usesTablets")
+	}
+
+	keyspace := decomposed[0]
+
+	data := make(map[string]interface{})
+	err := session.Query("SELECT * FROM system_schema.scylla_keyspaces WHERE keyspace_name = ?", keyspace).
+		MapScan(data)
+
+	if errors.Is(err, gocql.ErrNotFound) {
+		// Keyspace not found in scylla_keyspaces table, assume no tablets
+		return false, nil
+	}
+
+	if err != nil {
+		return false, fmt.Errorf("failed to find keyspace %s: %w", keyspace, err)
+	}
+
+	// Check if the result contains 'initial_tablets' column and it's not null
+	initialTablets, exists := data["initial_tablets"]
+	if exists && initialTablets != nil {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func splitStreamsByVnode(streams []StreamID) [][]StreamID {
+	vnodesIdxToStreams := make(map[int64][]StreamID, 0)
+	for _, stream := range streams {
+		idx := getVnodeIndexForStream(stream)
+		vnodesIdxToStreams[idx] = append(vnodesIdxToStreams[idx], stream)
+	}
+
+	groups := make([][]StreamID, 0, len(vnodesIdxToStreams[-1])+len(vnodesIdxToStreams))
+
+	// Idx -1 means that we don't know the vnode for given stream,
+	// therefore we will put those streams into a separate group
+	for _, stream := range vnodesIdxToStreams[-1] {
+		groups = append(groups, []StreamID{stream})
+	}
+
+	for vnode, group := range vnodesIdxToStreams {
+		if vnode != -1 {
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+// Computes vnode index from given stream ID.
+// Returns -1 if the stream ID format is unrecognized.
+func getVnodeIndexForStream(streamID StreamID) int64 {
+	if len(streamID) != 16 {
+		// Don't know how to handle other sizes
+		return -1
+	}
+
+	lowerQword := binary.BigEndian.Uint64(streamID[8:16])
+	version := lowerQword & (1<<4 - 1)
+	if version != 1 {
+		// Unrecognized version
+		return -1
+	}
+
+	vnodeIdx := (lowerQword >> 4) & (1<<22 - 1)
+	return int64(vnodeIdx)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"regexp"
 	"strconv"
 	"strings"
@@ -126,6 +127,33 @@ func (ppr *PeriodicProgressReporter) SaveAndStop(ctx context.Context) error {
 		ppr.logger.Printf("successfully saved final progress for %s: %s (%s)", ppr.reporter.streamID, ppr.timeToReport, ppr.timeToReport.Time())
 	}
 	return err
+}
+
+// backoffDelay computes an exponential backoff delay given a base delay,
+// a maximum delay, and the number of consecutive failures (starting from 1).
+// The delay doubles on each consecutive failure, capped at maxDelay.
+func backoffDelay(baseDelay, maxDelay time.Duration, consecutiveFailures int) time.Duration {
+	delay := baseDelay
+	for i := 1; i < consecutiveFailures; i++ {
+		if delay >= maxDelay/2 {
+			return maxDelay
+		}
+		delay *= 2
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
+// addJitter applies random jitter to a duration, returning a value
+// uniformly distributed in [d/2, 3d/2].
+func addJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int64N(int64(d)))
 }
 
 func CompareTimeUUID(u1, u2 gocql.UUID) int {
