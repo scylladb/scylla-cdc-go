@@ -1,16 +1,16 @@
 module github.com/scylladb/scylla-cdc-go
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/gocql/gocql v1.17.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 )
 
 require (
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.20.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 )
 
-replace github.com/gocql/gocql => github.com/scylladb/gocql v1.19.0
+replace github.com/gocql/gocql => github.com/scylladb/gocql v1.20.0
