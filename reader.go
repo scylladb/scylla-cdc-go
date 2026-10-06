@@ -71,15 +71,28 @@ func (rc *ReaderConfig) setDefaults() {
 // necessary. They have carefully selected default values that should work for
 // most cases. Changing these parameters need to be done carefully.
 type AdvancedReaderConfig struct {
-	// ConfidenceWindowSize defines a minimal age a change must have in order
-	// to be read.
+	// ConfidenceWindowSize limits CDC queries to timestamps older than the
+	// reader's current time minus this duration. The reader advances progress
+	// through a queried window after processing it. The default is 30 seconds.
 	//
 	// Due to the eventually consistent nature of Scylla, newer writes may
 	// appear in CDC log earlier than some older writes. This can cause the
-	// Reader to skip the older write, therefore the need for this parameter.
+	// Reader to skip the older write if it advances too soon. Choose a value
+	// longer than the effective write timeout for the original CDC-enabled
+	// table, including service-level and CQL USING TIMEOUT overrides. ScyllaDB's
+	// default write_request_timeout_in_ms is 2 seconds. Allow additional margin
+	// for clock skew between the reader and the host assigning write timestamps
+	// (the application or a ScyllaDB node), and for late replica writes. If a
+	// write uses an explicit timestamp, the window must also exceed how far
+	// back that timestamp can be from the reader's current time; older CDC
+	// entries may be skipped entirely. The write timeout helps bound visibility
+	// only when write and reader consistency levels overlap in the reader's DC
+	// (W + R > RF). Writes acknowledged at CL ONE/ANY or in another DC may
+	// become visible much later through hint replay. Shortening this window
+	// may reduce latency but increases the risk of missing late entries;
+	// QueryTimeWindowSize and post-query delays affect latency separately.
 	//
-	// If the parameter is left as 0, the library will automatically choose
-	// a default confidence window size.
+	// If left as 0, the default is used.
 	ConfidenceWindowSize time.Duration
 
 	// The library uses select statements to fetch changes from CDC Log tables.
