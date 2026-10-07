@@ -478,7 +478,7 @@ func TestReplicator(t *testing.T) {
 }
 
 func createSessionAndSetupSchema(t *testing.T, addr string, keyspaceName string, withCdc bool, schemas map[string]string) *gocql.Session {
-	testutils.CreateKeyspace(t, addr, keyspaceName)
+	testutils.CreateKeyspace(t, addr, keyspaceName, false)
 
 	cfg := gocql.NewCluster(addr)
 	cfg.Keyspace = keyspaceName
