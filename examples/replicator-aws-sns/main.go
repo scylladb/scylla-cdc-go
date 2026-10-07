@@ -399,7 +399,9 @@ func (r *SNSReplicator) sendChangeToSNS(ctx context.Context, change *scyllacdc.C
 func (r *SNSReplicator) End() error {
 	log.Printf("Streams [%s]: processed %d changes in total", r.streamID, r.localCount)
 	atomic.AddInt64(r.totalCount, r.localCount)
-	_ = r.reporter.SaveAndStop(context.Background())
+	if err := r.reporter.SaveAndStop(context.Background()); err != nil {
+		return &scyllacdc.EndCheckpointError{Err: err}
+	}
 	return nil
 }
 
