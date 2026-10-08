@@ -406,7 +406,6 @@ func (r *SNSReplicator) End() error {
 }
 
 func (r *SNSReplicator) Empty(ctx context.Context, ackTime gocql.UUID) error {
-	log.Printf("Streams [%s]: saw no changes up to %s", r.streamID, ackTime.Time())
 	r.reporter.Update(ackTime)
 	return nil
 }

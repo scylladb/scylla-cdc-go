@@ -510,12 +510,17 @@ func (e *EndCheckpointError) Unwrap() error { return e.Err }
 type ChangeOrEmptyNotificationConsumer interface {
 	ChangeConsumer
 
-	// Invoked upon empty results from the CDC log associated with the stream of
-	// the ChangeConsumer. This method is called to acknowledge a query window
-	// has been executed against the stream and the CDC log is to be considered
-	// completed as of 'ackTime' param passed.
+	// Invoked after a successful query window returns no new rows for this
+	// stream, even if other streams in the same batch returned rows. Rows at
+	// or before the stream's in-memory progress do not count as new. Empty is
+	// skipped if that progress is already at or past the window end.
+	// This can happen once per stream per query window. The consumer may save
+	// ackTime as its progress after earlier changes have been processed. Empty
+	// may be called again for a later window, including after a previous failure.
 	//
-	// If this method returns an error, the library will stop with an error.
+	// If this method returns an error, it is logged and the reader continues,
+	// unless the context was canceled. A failed checkpoint may cause changes
+	// to be replayed after a restart.
 	Empty(ctx context.Context, ackTime gocql.UUID) error
 }
 

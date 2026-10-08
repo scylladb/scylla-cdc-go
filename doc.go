@@ -130,15 +130,28 @@ Example:
 		return nil
 	}
 
-	type myFactory struct {
-		session *gocql.Session
+	func (mc *myConsumer) Empty(ctx context.Context, ackTime gocql.UUID) error {
+		// A successfully queried window contained no new rows for this stream.
+		// Save this point so an idle stream does not replay old windows on restart.
+		mc.reporter.Update(ackTime)
+		return nil
 	}
 
-	func (f *myFactory) CreateChangeConsumer(ctx context.Context, input scyllacdc.CreateChangeConsumerInput) (ChangeConsumer, error)
-		reporter := scyllacdc.NewPeriodicProgressReporter(f.session, time.Minute, input.ProgressReporter)
+	type myFactory struct{}
+
+	func (f *myFactory) CreateChangeConsumer(ctx context.Context, input scyllacdc.CreateChangeConsumerInput) (scyllacdc.ChangeConsumer, error) {
+		reporter := scyllacdc.NewPeriodicProgressReporter(log.Default(), time.Minute, input.ProgressReporter)
 		reporter.Start(ctx)
 		return &myConsumer{reporter: reporter}, nil
 	}
+
+Implement ChangeOrEmptyNotificationConsumer's Empty when using a progress manager.
+Empty is called for each stream with no new rows in a successfully queried
+window, including windows where another stream in the same batch has changes.
+It is skipped when the reader's in-memory progress for the stream is already
+at or past the window end. SaveAndStop in End persists the
+latest pending progress before shutdown. Return EndCheckpointError when that
+save fails so the reader can log it and continue a generation switch.
 
 Then, you need to specify an appropriate ProgressManager in the configuration.
 ProgressManager represents a mechanism of saving and restoring progress. You can
@@ -147,7 +160,11 @@ it yourself.
 
 In the main function:
 
-	cfg.ProgressReporter = scyllacdc.NewTableBackedProgressManager("my_keyspace.progress_table", "my_application_name")
+	progressManager, err := scyllacdc.NewTableBackedProgressManager(session, "my_keyspace.progress_table", "my_application_name")
+	if err != nil {
+		log.Fatal(err)
+	}
+	cfg.ProgressManager = progressManager
 
 # Processing changes
 
