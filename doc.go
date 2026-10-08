@@ -153,8 +153,8 @@ Data from the CDC log is supplied to the ChangeConsumer through Change objects,
 which can contain multiple ChangeRow objects. A single ChangeRow corresponds
 to a single, full (all columns included) row from the CDC log.
 
-	func (mc *myConsumer) Consume(ctx context.Background, change scyllacdc.Change) error {
-		for _, changeRow := range change.Deltas {
+	func (mc *myConsumer) Consume(ctx context.Context, change scyllacdc.Change) error {
+		for _, changeRow := range change.Delta {
 			// You can access CDC columns directly via
 			// GetValue, IsDeleted, GetDeletedElements
 			rawValue, _ := changeRow.GetValue("col_int")
