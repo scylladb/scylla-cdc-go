@@ -224,6 +224,10 @@ type Reader struct {
 	readFrom   time.Time
 	stoppedCh  chan struct{}
 	stopTime   atomic.Value
+
+	// Override database access in tests of generation switching.
+	fetchTTLFunc   func(*gocql.Session, string, string) (int64, error)
+	queryRangeFunc func(gocql.UUID, gocql.UUID) (cdcIterator, error)
 }
 
 // NewReader creates a new CDC reader using the specified configuration.
@@ -365,7 +369,11 @@ func (r *Reader) Run(ctx context.Context) error {
 
 				// Fetch the current table's TTL
 				startTime := r.readFrom
-				ttl, err := fetchScyllaCDCExtensionTTL(r.config.Session, keyspaceName, tableName)
+				fetchTTL := fetchScyllaCDCExtensionTTL
+				if r.fetchTTLFunc != nil {
+					fetchTTL = r.fetchTTLFunc
+				}
+				ttl, err := fetchTTL(r.config.Session, keyspaceName, tableName)
 				if err == nil {
 					if ttl != 0 {
 						l.Printf("the TTL for %s.%s is %d seconds", keyspaceName, tableName, ttl)
@@ -381,14 +389,16 @@ func (r *Reader) Run(ctx context.Context) error {
 				}
 
 				for _, group := range split {
-					readers = append(readers, newStreamBatchReader(
+					batch := newStreamBatchReader(
 						r.config,
 						gen.startTime,
 						group,
 						keyspaceName,
 						tableName,
 						gocql.MinTimeUUID(startTime),
-					))
+					)
+					batch.queryRangeFunc = r.queryRangeFunc
+					readers = append(readers, batch)
 				}
 			}
 
@@ -423,7 +433,7 @@ func (r *Reader) Run(ctx context.Context) error {
 							r.readFrom = stopAt
 						}
 					} else {
-						reader.close(gocql.MinTimeUUID(nextGen.startTime))
+						reader.closeForNextGeneration(gocql.MinTimeUUID(nextGen.startTime))
 						r.readFrom = nextGen.startTime
 					}
 				}

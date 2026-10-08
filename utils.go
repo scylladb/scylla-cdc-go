@@ -110,7 +110,9 @@ func (ppr *PeriodicProgressReporter) Stop() {
 }
 
 // SaveAndStop stops inner goroutine, waits until it finishes, and then
-// saves the most recent progress.
+// saves the most recent progress. It returns the progress save error on
+// failure. After all other cleanup succeeds, End may wrap that error in an
+// EndCheckpointError to allow a generation switch to continue.
 func (ppr *PeriodicProgressReporter) SaveAndStop(ctx context.Context) error {
 	close(ppr.stopCh)
 	<-ppr.finishCh
@@ -122,11 +124,10 @@ func (ppr *PeriodicProgressReporter) SaveAndStop(ctx context.Context) error {
 
 	err := ppr.reporter.MarkProgress(ctx, Progress{ppr.timeToReport})
 	if err != nil {
-		ppr.logger.Printf("failed to save progress for %s: %s", ppr.reporter.streamID, err)
-	} else {
-		ppr.logger.Printf("successfully saved final progress for %s: %s (%s)", ppr.reporter.streamID, ppr.timeToReport, ppr.timeToReport.Time())
+		return err
 	}
-	return err
+	ppr.logger.Printf("successfully saved final progress for %s: %s (%s)", ppr.reporter.streamID, ppr.timeToReport, ppr.timeToReport.Time())
+	return nil
 }
 
 // backoffDelay computes an exponential backoff delay given a base delay,

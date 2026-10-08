@@ -482,9 +482,28 @@ type ChangeConsumer interface {
 	// Called after all rows from the stream were consumed, and the reader
 	// is about to switch to a new generation, or stop execution altogether.
 	//
-	// If this method returns an error, the library will stop with an error.
+	// If this method returns an error, the library will stop with an error,
+	// except for an unwrapped EndCheckpointError during a generation switch.
 	End() error
 }
+
+// EndCheckpointError reports that End could not save the final progress
+// checkpoint, but completed all other cleanup successfully. A consumer may
+// wrap a SaveAndStop error in this type after its other cleanup succeeds.
+// During a generation switch, the reader logs this error and continues. A
+// restart before the next generation is saved may replay changes from the old
+// generation. On explicit stop, the reader returns this error if no earlier
+// error occurred.
+//
+// Return this error directly from End only when the sole failure is saving
+// progress. Wrapping it in another error makes it fatal. An error flushing
+// processed changes must remain fatal so the reader cannot skip them.
+type EndCheckpointError struct {
+	Err error
+}
+
+func (e *EndCheckpointError) Error() string { return fmt.Sprintf("final checkpoint: %v", e.Err) }
+func (e *EndCheckpointError) Unwrap() error { return e.Err }
 
 // ChangeOrEmptyNotificationConsumer is an extension to the ChangeConsumer
 // interface.

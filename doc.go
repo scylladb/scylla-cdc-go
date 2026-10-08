@@ -124,7 +124,9 @@ Example:
 	}
 
 	func (mc *myConsumer) End() error {
-		_ = mc.reporter.SaveAndStop(context.Background())
+		if err := mc.reporter.SaveAndStop(context.Background()); err != nil {
+			return &scyllacdc.EndCheckpointError{Err: err}
+		}
 		return nil
 	}
 

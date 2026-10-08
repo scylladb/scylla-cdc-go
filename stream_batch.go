@@ -24,8 +24,9 @@ type streamBatchReader struct {
 	keyspaceName   string
 	tableName      string
 
-	lastTimestamp gocql.UUID
-	endTimestamp  atomic.Value
+	lastTimestamp       gocql.UUID
+	endTimestamp        atomic.Value
+	switchingGeneration atomic.Bool
 
 	consumers map[string]ChangeConsumer
 
@@ -73,6 +74,11 @@ func (sbr *streamBatchReader) run(ctx context.Context) (err error) {
 		for s, c := range sbr.consumers {
 			err2 := c.End()
 			if err2 != nil {
+				if checkpointErr, checkpointOnly := err2.(*EndCheckpointError); checkpointOnly && sbr.switchingGeneration.Load() && *err == nil {
+					// A wrapped error may also contain a fatal cleanup failure.
+					sbr.config.Logger.Printf("final checkpoint failed for stream %s in %s at generation %s: %s", StreamID(s), sbr.getBaseTableName(), sbr.generationTime, checkpointErr.Err)
+					continue
+				}
 				sbr.config.Logger.Printf("error while ending consumer for stream %s (will quit): %s", StreamID(s), err2)
 			}
 			if *err == nil {
@@ -341,6 +347,11 @@ func (sbr *streamBatchReader) reachedEndOfTheGeneration(windowEnd gocql.UUID) bo
 func (sbr *streamBatchReader) close(processUntil gocql.UUID) {
 	sbr.endTimestamp.Store(processUntil)
 	sbr.interruptCh <- struct{}{}
+}
+
+func (sbr *streamBatchReader) closeForNextGeneration(processUntil gocql.UUID) {
+	sbr.switchingGeneration.Store(true)
+	sbr.close(processUntil)
 }
 
 func (sbr *streamBatchReader) stopNow() {
