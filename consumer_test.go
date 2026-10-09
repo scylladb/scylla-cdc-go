@@ -250,13 +250,13 @@ func (f *checkpointingFactory) hasPeerInVnode(stream scyllacdc.StreamID) bool {
 }
 
 type capturingProgressManager struct {
-	scyllacdc.ProgressManager
+	*scyllacdc.TableBackedProgressManager
 	target string
 	loaded chan scyllacdc.Progress
 }
 
 func (pm *capturingProgressManager) GetProgress(ctx context.Context, gen time.Time, table string, stream scyllacdc.StreamID) (scyllacdc.Progress, error) {
-	progress, err := pm.ProgressManager.GetProgress(ctx, gen, table, stream)
+	progress, err := pm.TableBackedProgressManager.GetProgress(ctx, gen, table, stream)
 	if err == nil && string(stream) == pm.target {
 		select {
 		case pm.loaded <- progress:
@@ -264,6 +264,17 @@ func (pm *capturingProgressManager) GetProgress(ctx context.Context, gen time.Ti
 		}
 	}
 	return progress, err
+}
+
+type loadedProgressLogger struct {
+	lines chan string
+}
+
+func (l *loadedProgressLogger) Printf(format string, args ...interface{}) {
+	select {
+	case l.lines <- fmt.Sprintf(format, args...):
+	default:
+	}
 }
 
 type checkpointingConsumer struct {
@@ -321,10 +332,10 @@ func TestConsumerRestartsAfterPersistingEmptyWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newReader := func(factory *checkpointingFactory, progressManager scyllacdc.ProgressManager) *scyllacdc.Reader {
+	newReader := func(factory *checkpointingFactory, progressManager scyllacdc.ProgressManager, logger scyllacdc.Logger) *scyllacdc.Reader {
 		reader, err := scyllacdc.NewReader(context.Background(), &scyllacdc.ReaderConfig{
 			Session: session, TableNames: []string{keyspace + ".tbl"},
-			ChangeConsumerFactory: factory, ProgressManager: progressManager,
+			ChangeConsumerFactory: factory, ProgressManager: progressManager, Logger: logger,
 			Advanced: scyllacdc.AdvancedReaderConfig{
 				ChangeAgeLimit: 2 * time.Second, QueryTimeWindowSize: 200 * time.Millisecond,
 				ConfidenceWindowSize: 100 * time.Millisecond,
@@ -365,7 +376,7 @@ func TestConsumerRestartsAfterPersistingEmptyWindow(t *testing.T) {
 	}
 
 	firstFactory := newFactory()
-	firstReader := newReader(firstFactory, manager)
+	firstReader := newReader(firstFactory, manager, nil)
 	if err := session.Query("INSERT INTO tbl (pk, v) VALUES (?, ?)", 1, 1).Exec(); err != nil {
 		t.Fatal(err)
 	}
@@ -415,13 +426,14 @@ func TestConsumerRestartsAfterPersistingEmptyWindow(t *testing.T) {
 	if !firstFactory.hasPeerInVnode(change.StreamID) {
 		t.Skip("busy stream has no peer in its vnode")
 	}
+	busyVnode := scyllacdc.GetVnodeIndexForStream(change.StreamID)
 	var checkpoint streamCheckpoint
 	deadline := time.After(30 * time.Second)
 waitForIdleCheckpoint:
 	for {
 		select {
 		case checkpoint = <-firstFactory.emptyEvents:
-			if string(checkpoint.stream) != string(change.StreamID) && scyllacdc.GetVnodeIndexForStream(checkpoint.stream) >= 0 && scyllacdc.GetVnodeIndexForStream(checkpoint.stream) == scyllacdc.GetVnodeIndexForStream(change.StreamID) && scyllacdc.CompareTimeUUID(checkpoint.time, change.Time) >= 0 {
+			if string(checkpoint.stream) != string(change.StreamID) && scyllacdc.GetVnodeIndexForStream(checkpoint.stream) == busyVnode && scyllacdc.CompareTimeUUID(checkpoint.time, change.Time) >= 0 {
 				break waitForIdleCheckpoint
 			}
 		case <-firstDone:
@@ -458,9 +470,10 @@ waitForIdleCheckpoint:
 
 	secondFactory := newFactory()
 	capturingManager := &capturingProgressManager{
-		ProgressManager: manager, target: string(checkpoint.stream), loaded: make(chan scyllacdc.Progress, 1),
+		TableBackedProgressManager: manager, target: string(checkpoint.stream), loaded: make(chan scyllacdc.Progress, 1),
 	}
-	secondReader := newReader(secondFactory, capturingManager)
+	logger := &loadedProgressLogger{lines: make(chan string, 1000)}
+	secondReader := newReader(secondFactory, capturingManager, logger)
 	secondDone, secondError, stopSecond := run(secondReader)
 	select {
 	case loaded := <-capturingManager.loaded:
@@ -471,6 +484,21 @@ waitForIdleCheckpoint:
 		t.Fatalf("restarted reader stopped before loading idle progress: %v", secondError())
 	case <-time.After(30 * time.Second):
 		t.Fatal("restarted reader did not load idle progress")
+	}
+	loadedLine := fmt.Sprintf("loaded progress for stream %s: %s", checkpoint.stream, saved.LastProcessedRecordTime)
+	deadline = time.After(30 * time.Second)
+waitForAppliedProgress:
+	for {
+		select {
+		case line := <-logger.lines:
+			if len(line) >= len(loadedLine) && line[:len(loadedLine)] == loadedLine {
+				break waitForAppliedProgress
+			}
+		case <-secondDone:
+			t.Fatalf("restarted reader stopped before applying idle progress: %v", secondError())
+		case <-deadline:
+			t.Fatal("restarted reader did not apply idle progress")
+		}
 	}
 	if err := session.Query("INSERT INTO tbl (pk, v) VALUES (?, ?)", 2, 2).Exec(); err != nil {
 		t.Fatal(err)

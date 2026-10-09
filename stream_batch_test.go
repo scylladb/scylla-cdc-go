@@ -131,14 +131,38 @@ func TestMixedBatchCheckpointsIdleStreamAcrossRestart(t *testing.T) {
 	if got := pm.values[string(idle)].LastProcessedRecordTime; CompareTimeUUID(got, gocql.MinTimeUUID(end)) != 0 {
 		t.Fatalf("idle checkpoint = %s, want %s", got, gocql.MinTimeUUID(end))
 	}
+	savedCheckpoints := map[string]gocql.UUID{
+		string(busy): pm.values[string(busy)].LastProcessedRecordTime,
+		string(idle): pm.values[string(idle)].LastProcessedRecordTime,
+	}
 
-	// A new batch uses persisted progress, skipping the old empty window.
-	restarted := newBatch()
-	if err := restarted.loadProgressForStreams(context.Background()); err != nil {
+	// A restarted batch filters the saved change and only checkpoints later windows.
+	restartedFactory := &checkpointConsumerFactory{consumers: make(map[string]*checkpointConsumer)}
+	restartedConfig := *config
+	restartedConfig.ChangeConsumerFactory = restartedFactory
+	restarted := newStreamBatchReader(&restartedConfig, start.Add(-24*time.Hour), []StreamID{busy, idle},
+		"ks", "tbl", gocql.MinTimeUUID(start))
+	restarted.queryRangeFunc = func(_, _ gocql.UUID) (cdcIterator, error) {
+		return &singleChangeIterator{stream: busy, when: changeTime}, nil
+	}
+	restarted.close(gocql.MinTimeUUID(end.Add(time.Second)))
+	if err := restarted.run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := restarted.perStreamProgress[string(idle)]; CompareTimeUUID(got, gocql.MinTimeUUID(end)) != 0 {
-		t.Fatalf("idle stream resumes at %s, want %s", got, gocql.MinTimeUUID(end))
+	for _, stream := range []StreamID{busy, idle} {
+		consumer := restartedFactory.consumers[string(stream)]
+		if consumer.changes != 0 {
+			t.Errorf("restarted stream %s consumed %d saved changes", stream, consumer.changes)
+		}
+		checkpoint := savedCheckpoints[string(stream)]
+		if len(consumer.ackTimes) == 0 {
+			t.Errorf("restarted stream %s received no later empty checkpoint", stream)
+		}
+		for _, ack := range consumer.ackTimes {
+			if CompareTimeUUID(ack, checkpoint) <= 0 {
+				t.Errorf("restarted stream %s acknowledged %s at or before saved progress %s", stream, ack, checkpoint)
+			}
+		}
 	}
 }
 
