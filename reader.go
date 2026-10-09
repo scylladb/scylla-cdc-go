@@ -285,7 +285,7 @@ func determineStartTimestamp(ctx context.Context, config *ReaderConfig) (time.Ti
 		if applicationStartTime.IsZero() {
 			config.Logger.Printf("no information about the application start time was found")
 		} else {
-			config.Logger.Printf("application started reading from time point %v", mostRecentGeneration)
+			config.Logger.Printf("application started reading from time point %v", applicationStartTime)
 		}
 	}
 

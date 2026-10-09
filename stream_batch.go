@@ -124,6 +124,7 @@ outer:
 	for {
 		var err error
 		var hadRows bool
+		var deliveredStreams map[string]bool
 
 		windowProcessingStartTime := time.Now()
 
@@ -142,28 +143,52 @@ outer:
 				}
 			} else {
 				tableMissingRetries = 0
-				rowCount, consumerErr := sbr.processRows(ctx, iter)
+				var consumerErr error
+				deliveredStreams, hadRows, consumerErr = sbr.processRows(ctx, iter)
 				if err = iter.Close(); err != nil {
 					sbr.config.Logger.Printf("error while querying (will retry): %s", err)
 				}
 				if consumerErr != nil {
 					return consumerErr
 				}
-				hadRows = rowCount > 0
 			}
 
 			if err == nil {
-				// If there were no errors, then we can safely advance
-				// all streams to the window end
-				sbr.advanceAllStreamsTo(wnd.end)
-
-				if !hadRows {
-					for _, c := range sbr.consumers {
-						if enc, ok := c.(ChangeOrEmptyNotificationConsumer); ok {
-							err = enc.Empty(ctx, wnd.end)
+				var failedEmptyCount int
+				var firstFailedStream StreamID
+				var firstEmptyErr error
+				logEmptyFailures := func() {
+					if failedEmptyCount != 0 {
+						sbr.config.Logger.Printf("error while acknowledging empty window ending at %s for %d streams (first: %s): %s", wnd.end, failedEmptyCount, firstFailedStream, firstEmptyErr)
+					}
+				}
+				// A batch may contain rows for one stream while others are idle.
+				// Let each idle stream persist the completed window independently.
+				for _, stream := range sbr.streams {
+					id := string(stream)
+					if deliveredStreams[id] || CompareTimeUUID(sbr.perStreamProgress[id], wnd.end) >= 0 {
+						continue
+					}
+					if enc, ok := sbr.consumers[id].(ChangeOrEmptyNotificationConsumer); ok {
+						if ctxErr := ctx.Err(); ctxErr != nil {
+							logEmptyFailures()
+							return ctxErr
+						}
+						if emptyErr := enc.Empty(ctx, wnd.end); emptyErr != nil {
+							failedEmptyCount++
+							if firstEmptyErr == nil {
+								firstFailedStream = stream
+								firstEmptyErr = emptyErr
+							}
+							if ctxErr := ctx.Err(); ctxErr != nil {
+								logEmptyFailures()
+								return ctxErr
+							}
 						}
 					}
 				}
+				logEmptyFailures()
+				sbr.advanceAllStreamsTo(wnd.end)
 			}
 		}
 
@@ -286,8 +311,9 @@ func (sbr *streamBatchReader) getConfidenceLimitPoint() time.Time {
 	return time.Now().Add(-sbr.config.Advanced.ConfidenceWindowSize)
 }
 
-func (sbr *streamBatchReader) processRows(ctx context.Context, iter cdcIterator) (int, error) {
-	rowCount := 0
+func (sbr *streamBatchReader) processRows(ctx context.Context, iter cdcIterator) (map[string]bool, bool, error) {
+	deliveredStreams := make(map[string]bool)
+	hadRows := false
 	var change Change
 
 	for {
@@ -295,6 +321,7 @@ func (sbr *streamBatchReader) processRows(ctx context.Context, iter cdcIterator)
 		if c == nil {
 			break
 		}
+		hadRows = true
 		switch c.GetOperation() {
 		case PreImage:
 			change.PreImage = append(change.PreImage, c)
@@ -304,19 +331,18 @@ func (sbr *streamBatchReader) processRows(ctx context.Context, iter cdcIterator)
 			change.Delta = append(change.Delta, c)
 		}
 
-		rowCount++
-
 		if c.cdcCols.endOfBatch {
 			// Since we are reading in batches and we started from the lowest progress mark
 			// of all streams in the batch, we might have to manually filter out changes
 			// from streams that had a save point later than the earliest progress mark
 			if CompareTimeUUID(sbr.perStreamProgress[string(changeBatchCols.streamID)], changeBatchCols.time) < 0 {
+				deliveredStreams[string(changeBatchCols.streamID)] = true
 				change.StreamID = changeBatchCols.streamID
 				change.Time = changeBatchCols.time
 				consumer := sbr.consumers[string(changeBatchCols.streamID)]
 				if err := consumer.Consume(ctx, change); err != nil {
 					sbr.config.Logger.Printf("error while processing change (will quit): %s", err)
-					return 0, err
+					return nil, hadRows, err
 				}
 
 				// It's important to save progress here. If fetching of a page fails,
@@ -330,7 +356,7 @@ func (sbr *streamBatchReader) processRows(ctx context.Context, iter cdcIterator)
 		}
 	}
 
-	return rowCount, nil
+	return deliveredStreams, hadRows, nil
 }
 
 func (sbr *streamBatchReader) getBaseTableName() string {
