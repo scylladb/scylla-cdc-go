@@ -102,6 +102,7 @@ func (sbr *streamBatchReader) run(ctx context.Context) (err error) {
 		consumer, err := sbr.config.ChangeConsumerFactory.CreateChangeConsumer(ctx, input)
 		if err != nil {
 			sbr.config.Logger.Printf("error while creating change consumer (will quit): %s", err)
+			return err
 		}
 
 		sbr.consumers[string(s)] = consumer

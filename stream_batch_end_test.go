@@ -69,6 +69,42 @@ func (pm *stopAfterGenerationProgressManager) StartGeneration(_ context.Context,
 	return nil
 }
 
+type createErrFactory struct{ err error }
+
+func (f createErrFactory) CreateChangeConsumer(context.Context, CreateChangeConsumerInput) (ChangeConsumer, error) {
+	return nil, f.err
+}
+
+func TestRunReturnsCreateConsumerError(t *testing.T) {
+	createErr := errors.New("create consumer failed")
+	sbr := newStreamBatchReader(
+		&ReaderConfig{
+			ChangeConsumerFactory: createErrFactory{err: createErr},
+			ProgressManager:       noProgressManager{},
+			Logger:                noLogger{},
+			Advanced: AdvancedReaderConfig{
+				QueryTimeWindowSize:  time.Minute,
+				ConfidenceWindowSize: time.Second,
+			},
+		},
+		time.Now(),
+		[]StreamID{StreamID("one")},
+		"ks",
+		"tbl",
+		gocql.TimeUUID(),
+	)
+	sbr.queryRangeFunc = func(gocql.UUID, gocql.UUID) (cdcIterator, error) {
+		return emptyIterator{}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := sbr.run(ctx)
+	if !errors.Is(err, createErr) {
+		t.Fatalf("run error = %v, want create consumer failed", err)
+	}
+}
+
 func TestReaderRunContinuesAfterCheckpointFailureAtGenerationSwitch(t *testing.T) {
 	first := time.Now().Add(-10 * time.Second)
 	second := first.Add(5 * time.Second)
