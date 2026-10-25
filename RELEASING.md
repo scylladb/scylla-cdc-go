@@ -6,8 +6,8 @@ exact tag still resolves to the triggering commit and creates a GitHub release
 with generated notes. It does not choose versions, create tags, or publish
 packages. Unsupported tag formats fail visibly. Release jobs serialize per tag;
 rerunning a successful job preserves the existing published release and curated
-text. A draft or unpublished release fails visibly and must be resolved manually
-before rerunning. The workflow must be on the default branch and the tagged commit must contain
+text. A draft, unpublished release, or prerelease under a stable tag fails visibly
+and must be resolved manually before rerunning. The workflow must be on the default branch and the tagged commit must contain
 `.github/release.yml` with the canonical exclusion before tagging. Existing tags do not trigger a run retroactively.
 
 Generated notes exclude pull requests carrying `omit-from-release-notes`.
@@ -23,9 +23,15 @@ documents in a module archive.
 
 The workflow rechecks PR updates and closure, and `sync-labels: true` removes
 the label when the filename rules stop matching. Jobs serialize by PR and read
-trusted repository configuration without checking out PR code. Classification
-uses the filenames reported by the stock action, including its handling of
-renames and API results. Do not use this label for runtime dependencies,
+trusted repository configuration without checking out PR code. The guard and
+stock action share the canonical filename policy. Before classification, the
+guard reads paginated file metadata and checks the count and head/base revisions.
+Both the source and destination of a rename must qualify. After the action, it
+checks the same file snapshot and the actual label. If setup, classification, or
+verification fails or is unexpectedly skipped, the final step attempts to remove
+the unverified omission label without needing the installed helper. API outages can prevent cleanup;
+failures remain visible. These before/after reads are not atomic and do not rule
+out later changes or races. Do not use this label for runtime dependencies,
 packaging, compatibility, API, performance, or security changes; author, title,
 `chore`, and `dependencies` labels never hide a change.
 
@@ -37,13 +43,38 @@ number on the default branch. For example:
 gh workflow run label-release-notes.yml --ref master -f pr_number=123
 ```
 
-Wait for those runs to succeed before tagging, and inspect the release preview.
+For every PR merged since the previous release and included in the intended tag,
+run or rerun classification on the default branch. Check the job's final
+`Verified head=... base=... count=... snapshot=... omit=...; actual label checked`
+line against the current PR's head SHA, base SHA, and changed-file count:
+
+```sh
+gh api repos/scylladb/scylla-cdc-go/pulls/123 --jq '{head: .head.sha, base: .base.sha, count: .changed_files}'
+gh pr view 123 --repo scylladb/scylla-cdc-go --json labels
+```
+
+Confirm the current omission label matches the verified result, and inspect the
+release preview before tagging. A green job alone does not prove that an older
+classification still matches the PR. New merges, PR changes, and manual label
+changes require another check. Release publication remains asynchronous and does
+not wait for classification. Automated release/classification synchronization is
+excluded from this PR, including later cycles and resumes, with no follow-up
+automation scheduled. Missed checks can leave omissions or unwanted support entries
+in published notes; rerunning the publisher preserves those notes.
+
 A manually applied omission label can also be removed by the next labeler run
 if the PR contains visible changes. Maintainers can correct the filename rules when a
 new support path is introduced; unknown paths are deliberately conservative.
 
-Run the release publisher tests without starting Scylla:
+The omission label controls GitHub release-note presentation. Local Jira label
+callers ignore add/remove events for exactly `omit-from-release-notes`, including
+manual changes, while preserving other events. Default-`GITHUB_TOKEN` label events
+do not trigger those workflows. Existing Jira copies are not cleaned, and other
+synchronization paths can restore copied metadata; shared automation is unchanged.
+
+Run the release-automation tests without starting Scylla:
 
 ```sh
+npm ci --ignore-scripts --prefix .github
 node --test .github/scripts/*.test.cjs
 ```

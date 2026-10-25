@@ -27,15 +27,16 @@ async function publish({github, context, core}) {
     }
   }
   await verifyTag();
-  let existing;
-  try {
-    existing = (await github.rest.repos.getReleaseByTag({owner, repo, tag})).data;
-  } catch (error) {
-    if (error.status !== 404) throw error;
-  }
+  // Tag lookup returns published releases only. With this job's write access,
+  // paginated listings also expose drafts that require manual resolution.
+  const releases = await github.paginate(github.rest.repos.listReleases,
+    {owner, repo, per_page: 100});
+  const matches = releases.filter(release => release.tag_name === tag);
+  if (matches.length > 1) throw new Error('Multiple releases match the tag; resolve manually');
+  const existing = matches[0];
   if (existing) {
-    if (existing.tag_name !== tag || existing.draft || !existing.published_at) {
-      throw new Error('Existing release is a draft/unpublished or has the wrong tag; resolve manually');
+    if (existing.draft || !existing.published_at || existing.prerelease !== false) {
+      throw new Error('Existing release is a draft, unpublished, or prerelease; resolve manually');
     }
     core.info(`Preserving published release ${tag}`);
     return;
@@ -52,7 +53,7 @@ async function publish({github, context, core}) {
   const release = (await github.rest.repos.createRelease({owner, repo,
     tag_name: tag, target_commitish: eventCommit, name: tag,
     draft: false, prerelease: false, generate_release_notes: true})).data;
-  if (release.tag_name !== tag || release.draft || !release.published_at) {
+  if (release.tag_name !== tag || release.draft || !release.published_at || release.prerelease !== false) {
     throw new Error('GitHub did not publish the requested release');
   }
   await verifyTag();

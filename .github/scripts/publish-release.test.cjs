@@ -3,7 +3,7 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {VERSION, publish} = require('./publish-release.cjs');
 const commit = 'a'.repeat(40);
-const published = {tag_name: 'v1.2.2', draft: false, published_at: '2026-10-25', html_url: 'release'};
+const published = {tag_name: 'v1.2.2', draft: false, prerelease: false, published_at: '2026-10-25', html_url: 'release'};
 function fixture() {
   const calls = [];
   const github = {rest: {
@@ -13,10 +13,14 @@ function fixture() {
     },
     repos: {
       getCommit: async args => {calls.push(['commit', args]); return {data: {sha: commit}};},
-      getReleaseByTag: async () => {throw {status: 404};},
+      listReleases: () => {},
       getContent: async args => {assert.equal(args.ref, commit); return {data: {encoding: 'base64', content: Buffer.from('changelog:\n  exclude:\n    labels:\n      - omit-from-release-notes\n').toString('base64')}};},
       createRelease: async args => {calls.push(['create', args]); return {data: published};},
     },
+  }, paginate: async (method, args) => {
+    assert.equal(method, github.rest.repos.listReleases);
+    assert.deepEqual(args, {owner: 'scylladb', repo: 'scylla-cdc-go', per_page: 100});
+    return [];
   }};
   return {github, context: {repo: {owner: 'scylladb', repo: 'scylla-cdc-go'}, ref: 'refs/tags/v1.2.2', sha: commit,
     payload: {repository: {default_branch: 'master'}}}, core: {info: () => {}}, calls};
@@ -49,14 +53,37 @@ test('annotated tags peel to the event commit', async () => {
   assert.equal(f.calls.at(-1)[0], 'create');
 });
 
-test('published releases are preserved, drafts and unpublished releases fail', async () => {
-  for (const existing of [published, {...published, draft: true}, {...published, published_at: null}, {...published, tag_name: 'v9.9.9'}]) {
+test('published stable releases are preserved; drafts, unpublished releases and prereleases fail', async () => {
+  for (const existing of [published, {...published, draft: true}, {...published, published_at: null}, {...published, prerelease: true}]) {
     const f = fixture();
-    f.github.rest.repos.getReleaseByTag = async () => ({data: existing});
+    f.github.paginate = async () => [existing];
     if (existing === published) await publish(f);
     else await assert.rejects(publish(f), /Existing release/);
     assert.equal(f.calls.some(([type]) => type === 'create'), false);
   }
+});
+
+test('draft-aware lookup selects the exact tag beyond the first page', async () => {
+  const f = fixture();
+  f.github.paginate = async (method, args) => {
+    assert.equal(method, f.github.rest.repos.listReleases);
+    assert.equal(args.per_page, 100);
+    return [...Array.from({length: 100}, (_, i) => ({...published, tag_name: `v0.0.${i}`})),
+      {...published, draft: true, published_at: null}];
+  };
+  await assert.rejects(publish(f), /Existing release/);
+  assert.equal(f.calls.some(([type]) => type === 'create'), false);
+});
+
+test('unrelated releases do not block creation and duplicate matches fail visibly', async () => {
+  const f = fixture();
+  f.github.paginate = async () => [{...published, tag_name: 'v9.9.9', draft: true}];
+  await publish(f);
+  assert.equal(f.calls.some(([type]) => type === 'create'), true);
+  const duplicate = fixture();
+  duplicate.github.paginate = async () => [published, {...published, draft: true}];
+  await assert.rejects(publish(duplicate), /Multiple releases/);
+  assert.equal(duplicate.calls.some(([type]) => type === 'create'), false);
 });
 
 test('moved, deleted, mismatched, or malformed tags never publish', async () => {
@@ -76,18 +103,24 @@ test('moved, deleted, mismatched, or malformed tags never publish', async () => 
 });
 
 test('API failures and missing configuration fail visibly before creating release', async () => {
-  for (const endpoint of ['getCommit', 'getReleaseByTag', 'getContent']) {
+  for (const endpoint of ['getCommit', 'getContent']) {
     const f = fixture(); f.github.rest.repos[endpoint] = async () => {throw new Error(endpoint);};
     await assert.rejects(publish(f), new RegExp(endpoint));
     assert.equal(f.calls.some(([type]) => type === 'create'), false);
   }
+  const listing = fixture();
+  listing.github.paginate = async () => {throw new Error('Release listing unavailable');};
+  await assert.rejects(publish(listing), /listing unavailable/);
+  assert.equal(listing.calls.some(([type]) => type === 'create'), false);
   const f = fixture();
   f.github.rest.repos.getContent = async () => ({data: {encoding: 'base64', content: Buffer.from('changelog: {}').toString('base64')}});
   await assert.rejects(publish(f), /configuration/);
 });
 
-test('unexpected draft response cannot report publication success', async () => {
-  const f = fixture();
-  f.github.rest.repos.createRelease = async () => ({data: {...published, draft: true}});
-  await assert.rejects(publish(f), /did not publish/);
+test('unexpected draft or prerelease response cannot report publication success', async () => {
+  for (const invalid of [{draft: true}, {prerelease: true}]) {
+    const f = fixture();
+    f.github.rest.repos.createRelease = async () => ({data: {...published, ...invalid}});
+    await assert.rejects(publish(f), /did not publish/);
+  }
 });
