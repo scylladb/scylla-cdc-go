@@ -6,13 +6,20 @@ const {join} = require('node:path');
 const yaml = require('js-yaml');
 
 const workflow = yaml.load(readFileSync(join(__dirname, '../workflows/call_jira_sync.yml'), 'utf8'));
+// These inspected conditions compare strings with lowercase literals. Actions
+// ignores case in string comparisons; casefold these known fixture operands.
+// This helper does not implement the general Actions expression language.
 const routes = (action, label) => Object.entries(workflow.jobs).filter(([, job]) =>
-  new Function('github', `return ${job.if}`)({event: {action, label: {name: label}}})).map(([name]) => name);
+  new Function('github', `return ${job.if}`)({event: {
+    action: action.toLowerCase(), label: {name: label?.toLowerCase()}
+  }})).map(([name]) => name);
 
 test('Jira callers filter only exact omission-label add/remove events', () => {
   for (const [action, job] of [['labeled', 'jira-sync-add-label'], ['unlabeled', 'jira-sync-remove-label']]) {
-    assert.deepEqual(routes(action, 'omit-from-release-notes'), []);
-    for (const label of ['bug', 'omit-from-release-notes-extra', 'Omit-from-release-notes']) {
+    for (const label of ['omit-from-release-notes', 'Omit-from-release-notes', 'OMIT-FROM-RELEASE-NOTES']) {
+      assert.deepEqual(routes(action, label), []);
+    }
+    for (const label of ['bug', 'omit-from-release-notes-extra', 'OMIT-FROM-RELEASE-NOTES-extra']) {
       assert.deepEqual(routes(action, label), [job]);
     }
   }

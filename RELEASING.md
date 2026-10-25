@@ -72,8 +72,10 @@ new support path is introduced; unknown paths are deliberately conservative.
 
 The omission label controls GitHub release-note presentation. Local Jira label
 callers ignore add/remove events for exactly `omit-from-release-notes`, including
-manual changes, while preserving other events. Default-`GITHUB_TOKEN` label events
-do not trigger those workflows. Existing Jira copies are not cleaned, and other
+manual changes, while preserving other events. The whole-name condition follows
+Actions' case-insensitive string comparisons; suffixes and other names retain
+normal routing. Default-`GITHUB_TOKEN` label events do not trigger those workflows.
+Existing Jira copies are not cleaned, and other
 synchronization paths can restore copied metadata; shared automation is unchanged.
 
 Run the release-automation tests without starting Scylla:
