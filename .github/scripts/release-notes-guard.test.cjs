@@ -13,6 +13,8 @@ const workflowText = readFileSync(join(__dirname, '../workflows/label-release-no
 const workflow = yaml.load(workflowText);
 const steps = workflow.jobs.classify.steps;
 const scripts = steps.filter(step => step.with?.script).map(step => step.with.script);
+const collectScript = steps.find(step => step.id === 'guard').with.script;
+const verifyScript = steps.at(-1).with.script;
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 function fixture(options = {}) {
@@ -61,7 +63,7 @@ async function adapter(f, hash, overrides = {}, load = () => guard) {
     GUARD_OUTCOME: 'success', LABELER_OUTCOME: 'success', UNSAFE_RENAME: 'false',
     SNAPSHOT_HASH: hash, ...overrides};
   const logs = [];
-  const run = new AsyncFunction('github', 'context', 'core', 'require', 'process', scripts[1]);
+  const run = new AsyncFunction('github', 'context', 'core', 'require', 'process', verifyScript);
   let error;
   try {
     await run(f.github, {repo}, {info: text => logs.push(text), error: text => logs.push(text)},
@@ -244,7 +246,7 @@ test('cleanup API failures remain visible without losing the original failure or
 });
 
 test('workflow adapters use environment input and emit bounded verified snapshot outputs', async () => {
-  const run = new AsyncFunction('github', 'context', 'core', 'require', 'process', scripts[0]);
+  const run = new AsyncFunction('github', 'context', 'core', 'require', 'process', collectScript);
   const outputs = {};
   const f = fixture();
   await run(f.github, {repo}, {setOutput: (key, value) => { outputs[key] = value; }, info: () => {}},
@@ -254,9 +256,9 @@ test('workflow adapters use environment input and emit bounded verified snapshot
   const invalid = await adapter(f, '', {PR_NUMBER: '01'});
   assert.match(invalid.error.message, /canonical positive safe PR number/);
   assert.equal(steps.at(-1).if, 'always()');
-  assert.equal(steps[0].with.ref, '${{ github.sha }}');
-  assert.equal(steps[0].with['persist-credentials'], false);
-  assert.equal(steps[1].run, 'npm ci --ignore-scripts --prefix .github');
+  assert.equal(steps.find(step => step.id === 'checkout').with.ref, '${{ github.sha }}');
+  assert.equal(steps.find(step => step.id === 'checkout').with['persist-credentials'], false);
+  assert.equal(steps.find(step => step.id === 'install').run, 'npm ci --ignore-scripts --prefix .github');
   const action = steps.find(step => step.id === 'labeler');
   assert.equal(action.if, "success() && steps.guard.outputs.unsafe-rename == 'false'");
   assert.equal(action.with['sync-labels'], true);
@@ -265,9 +267,26 @@ test('workflow adapters use environment input and emit bounded verified snapshot
 });
 
 test('merged-PR backfills load event tooling rather than the old PR base or head', () => {
-  const expression = steps[0].with.ref.replace(/^\$\{\{\s*|\s*\}\}$/g, '');
+  const expression = steps.find(step => step.id === 'checkout').with.ref.replace(/^\$\{\{\s*|\s*\}\}$/g, '');
   const checkoutRef = new Function('github', `return ${expression}`);
   for (const event of [{pull_request: {head: {sha: 'untrusted'}, base: {sha: 'old-base'}}}, {}]) {
     assert.equal(checkoutRef({sha: 'trusted-default-event', event}), 'trusted-default-event');
   }
+});
+
+test('dispatch precondition rejects non-default refs before checkout and cleanup needs no helper', async () => {
+  assert.equal(steps[0].name, 'Require default-branch manual dispatch');
+  const run = new AsyncFunction('context', steps[0].with.script);
+  const payload = {repository: {default_branch: 'master'}};
+  await run({eventName: 'workflow_dispatch', ref: 'refs/heads/master', payload});
+  await run({eventName: 'pull_request_target', ref: 'refs/heads/release-branch', payload});
+  for (const ref of ['refs/heads/feature', 'refs/tags/v1.2.3']) {
+    await assert.rejects(run({eventName: 'workflow_dispatch', ref, payload}), /repository default branch/);
+  }
+  const f = fixture({labels: [label, 'unrelated']});
+  const {error} = await adapter(f, '', {CHECKOUT_OUTCOME: 'skipped', INSTALL_OUTCOME: 'skipped',
+    GUARD_OUTCOME: 'skipped', LABELER_OUTCOME: 'skipped'}, () => {throw new Error('Must not load helper');});
+  assert.match(error.message, /predecessor failed/);
+  assert.deepEqual([...f.labels], ['unrelated']);
+  assert.deepEqual(f.calls, ['remove']);
 });

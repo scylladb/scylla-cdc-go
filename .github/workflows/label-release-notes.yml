@@ -27,6 +27,14 @@ jobs:
     env:
       PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
     steps:
+      - name: Require default-branch manual dispatch
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            if (context.eventName === 'workflow_dispatch' &&
+                context.ref !== `refs/heads/${context.payload.repository.default_branch}`) {
+              throw new Error('Run manual classification on the repository default branch');
+            }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         id: checkout
         with:

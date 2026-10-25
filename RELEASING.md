@@ -43,6 +43,10 @@ number on the default branch. For example:
 gh workflow run label-release-notes.yml --ref master -f pr_number=123
 ```
 
+Manual dispatch from another branch or a tag fails before helper checkout;
+the finalizer still attempts omission-label cleanup. The check validates the
+dispatch entrypoint; trusted workflow code remains a prerequisite.
+
 For every PR merged since the previous release and included in the intended tag,
 run or rerun classification on the default branch. Check the job's final
 `Verified head=... base=... count=... snapshot=... omit=...; actual label checked`
