@@ -74,7 +74,10 @@ async function verify(github, repo, number, expectedHash) {
   if (current.hash !== expectedHash) throw new Error('PR file snapshot changed since classification');
   const labels = await github.paginate(github.rest.issues.listLabelsOnIssue,
     {...repo, issue_number: number, per_page: 100});
-  if (labels.some(item => item.name === label) !== current.omit) {
+  if (!labels.every(item => item && typeof item.name === 'string' && item.name.length > 0)) {
+    throw new Error('Invalid label metadata');
+  }
+  if (labels.some(item => item.name.toLowerCase() === label) !== current.omit) {
     throw new Error('Actual omission label does not match verified file policy');
   }
   const after = await readRevision(github, {...repo, pull_number: number});

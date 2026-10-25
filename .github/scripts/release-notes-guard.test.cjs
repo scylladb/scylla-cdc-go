@@ -39,7 +39,11 @@ function fixture(options = {}) {
       assert.deepEqual(params, {...repo, issue_number: 20, name: label});
       calls.push('remove');
       if (options.cleanupFailure) throw new Error('Removal unavailable');
-      if (!labels.delete(label)) throw {status: 404};
+      // GitHub looks up the logical label without case sensitivity while
+      // preserving its stored spelling in returned metadata.
+      const actual = [...labels].find(name => name.toLowerCase() === label);
+      if (actual === undefined) throw {status: 404};
+      labels.delete(actual);
     }
   }}, paginate: async (method, params) => {
     assert.equal(params.per_page, 100);
@@ -53,7 +57,7 @@ function fixture(options = {}) {
     assert.deepEqual(params, {...repo, issue_number: 20, per_page: 100});
     calls.push('labels');
     if (options.labelFailure) throw new Error('Labels unavailable');
-    return [...labels].map(name => ({name}));
+    return options.labelMetadata ?? [...labels].map(name => ({name}));
   }};
   return {github, labels, calls};
 }
@@ -203,6 +207,38 @@ test('successful verification checks actual labels and preserves unrelated label
     assert.match(logs[0], /Verified head=head base=base count=1 snapshot=.*actual label checked/);
     assert.equal(f.labels.has('unrelated'), true);
     assert.ok(!f.calls.includes('remove'));
+  }
+});
+
+test('actual logical marker identity preserves support omissions and rejects runtime omissions regardless of casing', async () => {
+  const marker = 'Omit-from-release-notes';
+  const other = 'OMIT-FROM-RELEASE-NOTES-extra';
+  for (const [name, omit] of [['README.md', true], ['reader.go', false]]) {
+    const f = fixture({files: [file(name)], labels: [marker, other, 'unrelated']});
+    const original = await guard.snapshot(f.github, repo, 20);
+    const {error} = await adapter(f, original.hash);
+    if (omit) {
+      assert.ifError(error);
+      assert.equal(f.labels.has(marker), true);
+      assert.ok(!f.calls.includes('remove'));
+    } else {
+      assert.match(error.message, /Actual omission label/);
+      assert.equal(f.labels.has(marker), false);
+      assert.equal(f.calls.filter(call => call === 'remove').length, 1);
+    }
+    assert.equal(f.labels.has(other), true);
+    assert.equal(f.labels.has('unrelated'), true);
+  }
+});
+
+test('invalid actual-label metadata fails verification and attempts canonical cleanup', async () => {
+  const original = await guard.snapshot(fixture().github, repo, 20);
+  for (const item of [null, {}, {name: 42}, {name: ''}]) {
+    const f = fixture({labels: [label, 'unrelated'], labelMetadata: [item]});
+    const {error} = await adapter(f, original.hash);
+    assert.match(error.message, /Invalid label metadata/);
+    assert.deepEqual([...f.labels], ['unrelated']);
+    assert.equal(f.calls.filter(call => call === 'remove').length, 1);
   }
 });
 
