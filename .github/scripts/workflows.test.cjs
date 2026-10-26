@@ -36,3 +36,14 @@ test('other Jira events retain their routes and reusable workflow authentication
     assert.equal(job.secrets.caller_jira_auth, '${{ secrets.USER_AND_KEY_FOR_JIRA_AUTOMATION }}');
   }
 });
+
+test('trusted release controller installs its locked parser before loading the publisher', () => {
+  const release = yaml.load(readFileSync(join(__dirname, '../workflows/release.yml'), 'utf8'));
+  const steps = release.jobs.release.steps;
+  const checkout = steps.findIndex(step => step.with?.ref);
+  const install = steps.findIndex(step => step.run === 'npm ci --ignore-scripts --prefix .github');
+  const publish = steps.findIndex(step => step.with?.script?.includes('publish-release.cjs'));
+  assert.equal(steps[checkout].with.ref, '${{ github.event.repository.default_branch }}');
+  assert.equal(steps[checkout].with['persist-credentials'], false);
+  assert.ok(checkout < install && install < publish);
+});

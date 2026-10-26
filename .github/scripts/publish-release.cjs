@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ScyllaDB
+const yaml = require('js-yaml');
 const VERSION = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 async function publish({github, context, core}) {
@@ -46,12 +47,16 @@ async function publish({github, context, core}) {
   const config = (await github.rest.repos.getContent({owner, repo,
     path: '.github/release.yml', ref: eventCommit})).data;
   const text = Buffer.from(config.content || '', 'base64').toString('utf8');
-  if (config.encoding !== 'base64' || !/labels:\s*\n\s*- omit-from-release-notes\s*(?:\n|$)/.test(text)) {
+  const exclusions = config.encoding === 'base64' ? yaml.load(text)?.changelog?.exclude?.labels : undefined;
+  if (!Array.isArray(exclusions) || !exclusions.includes('omit-from-release-notes')) {
     throw new Error('Release-revision configuration lacks the canonical exclusion');
   }
   await verifyTag();
+  // The existing tag determines the release revision. A redundant old
+  // target_commitish can require workflow-write permission unavailable to
+  // GITHUB_TOKEN even though tag resolution does not use that argument.
   const release = (await github.rest.repos.createRelease({owner, repo,
-    tag_name: tag, target_commitish: eventCommit, name: tag,
+    tag_name: tag, name: tag,
     draft: false, prerelease: false, generate_release_notes: true})).data;
   if (release.tag_name !== tag || release.draft || !release.published_at || release.prerelease !== false) {
     throw new Error('GitHub did not publish the requested release');

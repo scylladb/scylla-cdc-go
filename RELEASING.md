@@ -3,12 +3,25 @@
 Push an existing release candidate as a stable version tag such as `v1.2.2`
 (the current format is `vMAJOR.MINOR.PATCH`). The release workflow verifies the
 exact tag still resolves to the triggering commit and creates a GitHub release
-with generated notes. It does not choose versions, create tags, or publish
-packages. Unsupported tag formats fail visibly. Release jobs serialize per tag;
+with generated notes. Prepare the version and tag before publication; this workflow
+does not choose versions or publish packages. Tags outside the workflow's
+`v[0-9]*.[0-9]*.[0-9]*` push filter are
+ignored. Matching tags that fail the canonical stable-version check fail visibly.
+Release jobs serialize per tag;
 rerunning a successful job preserves the existing published release and curated
 text. A draft, unpublished release, or prerelease under a stable tag fails visibly
 and must be resolved manually before rerunning. The workflow must be on the default branch and the tagged commit must contain
 `.github/release.yml` with the canonical exclusion before tagging. Existing tags do not trigger a run retroactively.
+
+The verified existing tag determines the release revision. The request omits
+`target_commitish` so older tags do not require workflow-write permission merely
+because their workflow files differ from the default branch. Tag reads and release
+creation are separate API operations. If the tag disappears between the last read
+and creation, GitHub can recreate it at the default branch before the final check
+fails. A tag move during that interval can also leave a created release requiring
+manual correction. The workflow reports detected changes without rollback; it
+does not provide an atomic remote-ref guarantee. Avoid moving or deleting a tag
+while publication runs.
 
 Generated notes exclude pull requests carrying `omit-from-release-notes`.
 `actions/labeler` uses `.github/labeler.yml` to add it only when every reported
