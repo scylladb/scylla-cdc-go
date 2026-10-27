@@ -78,9 +78,9 @@ Confirm the current omission label matches the verified result, and inspect the
 release preview before tagging. A green job alone does not prove that an older
 classification still matches the PR. New merges, PR changes, and manual label
 changes require another check. Release publication remains asynchronous and does
-not wait for classification. Automated release/classification synchronization is
-excluded from this PR, including later cycles and resumes, with no follow-up
-automation scheduled. Missed checks can leave omissions or unwanted support entries
+not wait for classification. Maintainers must perform these checks manually;
+the release workflow does not synchronize publication with classification.
+Missed checks can leave omissions or unwanted support entries
 in published notes; rerunning the publisher preserves those notes.
 
 A manually applied omission label can also be removed by the next labeler run
