@@ -13,6 +13,8 @@ const workflowText = readFileSync(join(__dirname, '../workflows/label-release-no
 const workflow = yaml.load(workflowText);
 const steps = workflow.jobs.classify.steps;
 const scripts = steps.filter(step => step.with?.script).map(step => step.with.script);
+const targetScript = steps.find(step => step.id === 'target').with.script;
+const dispatchStep = steps.find(step => step.name === 'Require default-branch manual dispatch');
 const collectScript = steps.find(step => step.id === 'guard').with.script;
 const verifyScript = steps.at(-1).with.script;
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -23,13 +25,13 @@ function fixture(options = {}) {
   const calls = [];
   let gets = 0;
   let listings = 0;
-  const initial = {head: {sha: 'head'}, base: {sha: 'base'}, changed_files: files.length};
+  const initial = {number: 20, head: {sha: 'head'}, base: {sha: 'base'}, changed_files: files.length};
   const github = {rest: {pulls: {
     get: async params => {
       assert.deepEqual(params, {...repo, pull_number: 20});
       calls.push('get');
       gets++;
-      if (options.failGetAt === gets) throw new Error('PR lookup unavailable');
+      if (options.failGetAt === gets) throw options.lookupError ?? new Error('PR lookup unavailable');
       return {data: {...initial, ...options.revisions?.[gets - 1]}};
     },
     listFiles: () => {}
@@ -63,7 +65,9 @@ function fixture(options = {}) {
 }
 
 async function adapter(f, hash, overrides = {}, load = () => guard) {
-  const env = {PR_NUMBER: '20', CHECKOUT_OUTCOME: 'success', INSTALL_OUTCOME: 'success',
+  // Existing finalizer cases start with a previously confirmed PR.
+  const env = {PR_NUMBER: '20', CONFIRMED_PR_NUMBER: '20', TARGET_OUTCOME: 'success',
+    CHECKOUT_OUTCOME: 'success', INSTALL_OUTCOME: 'success',
     GUARD_OUTCOME: 'success', LABELER_OUTCOME: 'success', UNSAFE_RENAME: 'false',
     SNAPSHOT_HASH: hash, ...overrides};
   const logs = [];
@@ -253,8 +257,8 @@ test('intentional unsafe-rename skip removes omission label and verifies visible
   assert.equal(f.calls.filter(call => call === 'remove').length, 1);
 });
 
-test('failed or skipped setup, guard and labeler clean up without requiring the helper', async () => {
-  for (const key of ['CHECKOUT_OUTCOME', 'INSTALL_OUTCOME', 'GUARD_OUTCOME', 'LABELER_OUTCOME']) {
+test('failed or skipped predecessors clean up confirmed PRs without requiring the helper', async () => {
+  for (const key of ['TARGET_OUTCOME', 'CHECKOUT_OUTCOME', 'INSTALL_OUTCOME', 'GUARD_OUTCOME', 'LABELER_OUTCOME']) {
     for (const outcome of ['failure', 'skipped', 'cancelled', '']) {
       const f = fixture({labels: [label, 'unrelated']});
       const {error} = await adapter(f, '', {[key]: outcome}, () => { throw new Error('Must not require helper'); });
@@ -311,8 +315,7 @@ test('merged-PR backfills load event tooling rather than the old PR base or head
 });
 
 test('dispatch precondition rejects non-default refs before checkout and cleanup needs no helper', async () => {
-  assert.equal(steps[0].name, 'Require default-branch manual dispatch');
-  const run = new AsyncFunction('context', steps[0].with.script);
+  const run = new AsyncFunction('context', dispatchStep.with.script);
   const payload = {repository: {default_branch: 'master'}};
   await run({eventName: 'workflow_dispatch', ref: 'refs/heads/master', payload});
   await run({eventName: 'pull_request_target', ref: 'refs/heads/release-branch', payload});
@@ -325,4 +328,122 @@ test('dispatch precondition rejects non-default refs before checkout and cleanup
   assert.match(error.message, /predecessor failed/);
   assert.deepEqual([...f.labels], ['unrelated']);
   assert.deepEqual(f.calls, ['remove']);
+});
+
+async function confirmTarget(f, context, raw = '20') {
+  const outputs = {};
+  let error;
+  try {
+    await new AsyncFunction('github', 'context', 'core', 'process', targetScript)(f.github, context,
+      {setOutput: (key, value) => { outputs[key] = value; }}, {env: {PR_NUMBER: raw}});
+  } catch (caught) { error = caught; }
+  return {outputs, error, outcome: error ? 'failure' : 'success'};
+}
+
+async function failAfterConfirmation(f, confirmation, overrides = {}) {
+  return adapter(f, '', {CONFIRMED_PR_NUMBER: confirmation.outputs['confirmed-pr-number'] ?? '',
+    TARGET_OUTCOME: confirmation.outcome, CHECKOUT_OUTCOME: 'skipped', INSTALL_OUTCOME: 'skipped',
+    GUARD_OUTCOME: 'skipped', LABELER_OUTCOME: 'skipped', ...overrides},
+  () => { throw new Error('Cleanup must not require a helper'); });
+}
+
+test('unconfirmed manual issues, unavailable or mismatched PRs never write labels', async () => {
+  for (const options of [{failGetAt: 1, lookupError: {status: 404}}, {failGetAt: 1},
+    {revisions: [{number: 21}]}, {revisions: [{number: '20'}]}]) {
+    const f = fixture({...options, labels: [label, 'unrelated']});
+    const confirmation = await confirmTarget(f, {repo, eventName: 'workflow_dispatch'});
+    assert.ok(confirmation.error);
+    assert.deepEqual(confirmation.outputs, {});
+    const {error} = await failAfterConfirmation(f, confirmation);
+    assert.deepEqual(f.calls, ['get']);
+    assert.deepEqual([...f.labels], [label, 'unrelated']);
+    assert.match(error.message, /not confirmed/);
+  }
+});
+
+test('trusted PR payload must match the requested identity and avoids a lookup', async () => {
+  const f = fixture({failGetAt: 1, labels: [label, 'unrelated']});
+  const confirmation = await confirmTarget(f, {repo, eventName: 'pull_request_target',
+    payload: {pull_request: {number: 20}}});
+  assert.ifError(confirmation.error);
+  assert.deepEqual(confirmation.outputs, {'confirmed-pr-number': '20'});
+  assert.deepEqual(f.calls, []);
+  const {error} = await failAfterConfirmation(f, confirmation);
+  assert.deepEqual(f.calls, ['remove']);
+  assert.deepEqual([...f.labels], ['unrelated']);
+  assert.match(error.message, /predecessor failed/);
+  for (const payload of [{}, {pull_request: {number: 21}}]) {
+    const other = fixture({labels: [label]});
+    const rejected = await confirmTarget(other, {repo, eventName: 'pull_request_target', payload});
+    assert.match(rejected.error.message, /does not match/);
+    await failAfterConfirmation(other, rejected);
+    assert.deepEqual(other.calls, []);
+    assert.equal(other.labels.has(label), true);
+  }
+});
+
+test('confirmed manual PR identity survives later lookup, setup and helper failure', async () => {
+  for (const overrides of [{}, {CHECKOUT_OUTCOME: 'failure'},
+    {CHECKOUT_OUTCOME: 'success', INSTALL_OUTCOME: 'failure'},
+    {CHECKOUT_OUTCOME: 'success', INSTALL_OUTCOME: 'success', GUARD_OUTCOME: 'failure'}]) {
+    const f = fixture({labels: [label, 'unrelated'], failGetAt: 2});
+    const confirmation = await confirmTarget(f, {repo, eventName: 'workflow_dispatch'});
+    assert.ifError(confirmation.error);
+    const {error} = await failAfterConfirmation(f, confirmation, overrides);
+    assert.match(error.message, /predecessor failed/);
+    assert.deepEqual(f.calls, ['get', 'remove']);
+    assert.deepEqual([...f.labels], ['unrelated']);
+  }
+  const f = fixture({labels: [label, 'unrelated'], failGetAt: 2});
+  const confirmation = await confirmTarget(f, {repo, eventName: 'workflow_dispatch'});
+  const {error} = await adapter(f, '', {CONFIRMED_PR_NUMBER: confirmation.outputs['confirmed-pr-number']});
+  assert.match(error.message, /lookup unavailable/);
+  assert.deepEqual(f.calls, ['get', 'get', 'remove']);
+  assert.deepEqual([...f.labels], ['unrelated']);
+});
+
+test('identity output wiring rejects a different number before all label writes', async () => {
+  const f = fixture({labels: [label]});
+  const {error} = await adapter(f, '', {CONFIRMED_PR_NUMBER: '21'});
+  assert.match(error.message, /not confirmed/);
+  assert.deepEqual(f.calls, []);
+  const target = steps.findIndex(step => step.id === 'target');
+  assert.ok(target < steps.indexOf(dispatchStep));
+  assert.ok(target < steps.findIndex(step => step.id === 'checkout'));
+  assert.ok(target < steps.findIndex(step => step.id === 'install'));
+  assert.equal(steps.at(-1).env.CONFIRMED_PR_NUMBER, '${{ steps.target.outputs.confirmed-pr-number }}');
+  assert.equal(steps.at(-1).env.TARGET_OUTCOME, '${{ steps.target.outcome }}');
+});
+
+test('confirmed identity and collected outputs feed successful verification for both entrypoints', async () => {
+  for (const eventName of ['workflow_dispatch', 'pull_request_target']) {
+    const f = fixture({labels: [label, 'unrelated']});
+    const context = {repo, eventName, payload: {pull_request: {number: 20}}};
+    const confirmation = await confirmTarget(f, context);
+    assert.ifError(confirmation.error);
+    const collected = {};
+    await new AsyncFunction('github', 'context', 'core', 'require', 'process', collectScript)(
+      f.github, context, {setOutput: (key, value) => { collected[key] = value; }, info: () => {}},
+      () => guard, {env: {PR_NUMBER: '20'}});
+    const {error, logs} = await adapter(f, collected.hash, {
+      CONFIRMED_PR_NUMBER: confirmation.outputs['confirmed-pr-number'],
+      TARGET_OUTCOME: confirmation.outcome, UNSAFE_RENAME: collected['unsafe-rename']
+    });
+    assert.ifError(error);
+    assert.match(logs[0], /omit=true; actual label checked/);
+    assert.ok(!f.calls.includes('remove'));
+    assert.deepEqual([...f.labels], [label, 'unrelated']);
+  }
+});
+
+test('confirmed manual targets retain cleanup after a rejected dispatch branch', async () => {
+  const f = fixture({labels: [label, 'unrelated'], failGetAt: 2});
+  const context = {repo, eventName: 'workflow_dispatch', ref: 'refs/heads/other',
+    payload: {repository: {default_branch: 'master'}}};
+  const confirmation = await confirmTarget(f, context);
+  assert.ifError(confirmation.error);
+  await assert.rejects(new AsyncFunction('context', dispatchStep.with.script)(context), /default branch/);
+  await failAfterConfirmation(f, confirmation);
+  assert.deepEqual(f.calls, ['get', 'remove']);
+  assert.deepEqual([...f.labels], ['unrelated']);
 });

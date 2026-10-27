@@ -37,12 +37,16 @@ documents in a module archive.
 The workflow rechecks PR updates and closure, and `sync-labels: true` removes
 the label when the filename rules stop matching. Jobs serialize by PR and read
 trusted repository configuration without checking out PR code. The guard and
-stock action share the canonical filename policy. Before classification, the
-guard reads paginated file metadata and checks the count and head/base revisions.
+stock action share the canonical filename policy. Before checkout or dependency
+installation, the workflow confirms the exact PR number using its trusted PR
+event or a manual PR API lookup. Ordinary issues, unavailable lookups, and
+mismatched or unconfirmed targets leave all labels unchanged. Before classification,
+the guard reads paginated file metadata and checks the count and head/base revisions.
 Both the source and destination of a rename must qualify. After the action, it
 checks the same file snapshot and the actual label. If setup, classification, or
-verification fails or is unexpectedly skipped, the final step attempts to remove
-the unverified omission label without needing the installed helper. API outages can prevent cleanup;
+verification fails or is unexpectedly skipped for a confirmed PR, the final step
+attempts to remove the unverified omission label using the saved confirmation, without needing a new
+identity lookup or the installed helper. API outages can prevent cleanup;
 failures remain visible. These before/after reads are not atomic and do not rule
 out later changes or races. Do not use this label for runtime dependencies,
 packaging, compatibility, API, performance, or security changes; author, title,
@@ -57,8 +61,8 @@ gh workflow run label-release-notes.yml --ref master -f pr_number=123
 ```
 
 Manual dispatch from another branch or a tag fails before helper checkout;
-the finalizer still attempts omission-label cleanup. The check validates the
-dispatch entrypoint; trusted workflow code remains a prerequisite.
+the finalizer still attempts omission-label cleanup for a confirmed PR. The check
+validates the dispatch entrypoint; trusted workflow code remains a prerequisite.
 
 For every PR merged since the previous release and included in the intended tag,
 run or rerun classification on the default branch. Check the job's final
