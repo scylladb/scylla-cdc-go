@@ -1,0 +1,6 @@
+# A single union pattern must match every changed filename.
+# Keep examples, runtime sources, module manifests, and build inputs visible.
+omit-from-release-notes:
+  - changed-files:
+      - all-globs-to-all-files:
+          - '{README.md,RELEASING.md,**/*_test.go,testutils/utils.go,ci/docker-compose.yml,.github/**,.gitignore,.golangci.yml,renovate.json,examples/replicator/.gitignore}'
