@@ -43,8 +43,7 @@ for the intended datacenter and disable cross-datacenter failover, for example:
 
 ```go
 cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(
-    gocql.DCAwareRoundRobinPolicy(localDC),
-    gocql.HostPolicyOptionDisableDCFailover,
+    gocql.DCAwareRoundRobinPolicy(localDC, gocql.HostPolicyOptionDisableDCFailover),
 )
 ```
 
