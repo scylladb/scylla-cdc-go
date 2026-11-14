@@ -12,7 +12,7 @@ func TestParseConsistency(t *testing.T) {
 		input string
 		want  gocql.Consistency
 	}{
-		{name: "omitted", want: gocql.LocalQuorum},
+		{name: "empty", want: gocql.LocalQuorum},
 		{name: "local quorum", input: "local_quorum", want: gocql.LocalQuorum},
 		{name: "mixed case", input: "LoCaL_QuOrUm", want: gocql.LocalQuorum},
 		{name: "one", input: "one", want: gocql.One},
