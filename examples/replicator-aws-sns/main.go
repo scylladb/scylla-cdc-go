@@ -45,8 +45,8 @@ func main() {
 	flag.StringVar(&table, "table", "", "table name; you can specify multiple table by separating them with a comma")
 	flag.StringVar(&source, "source", "", "address of a node in source cluster")
 	flag.StringVar(&progressNode, "progress-node", "", "address of a node in progress cluster")
-	flag.StringVar(&readConsistency, "read-consistency", "", "consistency level used to read from cdc log (one, quorum, all)")
-	flag.StringVar(&writeConsistency, "write-consistency", "", "consistency level used to write to the destination cluster (one, quorum, all)")
+	flag.StringVar(&readConsistency, "read-consistency", "local_quorum", "consistency level used to read from cdc log (one, quorum, all, local_quorum)")
+	flag.StringVar(&writeConsistency, "write-consistency", "local_quorum", "consistency level used to read and write the progress table (one, quorum, all, local_quorum)")
 	flag.StringVar(&progressTable, "progress-table", "", "fully-qualified name of the table in the destination cluster to use for saving progress; if omitted, the progress won't be saved")
 
 	flag.StringVar(&snsTopic, "sns-topic", "", "SNS Topic ARN")
@@ -144,6 +144,8 @@ func main() {
 
 func parseConsistency(s string) gocql.Consistency {
 	switch strings.ToLower(s) {
+	case "", "local_quorum":
+		return gocql.LocalQuorum
 	case "one":
 		return gocql.One
 	case "quorum":
@@ -151,8 +153,8 @@ func parseConsistency(s string) gocql.Consistency {
 	case "all":
 		return gocql.All
 	default:
-		log.Printf("warning: got unsupported consistency level \"%s\", will use \"one\" instead", s)
-		return gocql.One
+		log.Printf("warning: got unsupported consistency level \"%s\", will use \"local_quorum\" instead", s)
+		return gocql.LocalQuorum
 	}
 }
 
